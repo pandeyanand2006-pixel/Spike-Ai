@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Spike</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+  <link rel="icon" type="image/svg+xml" href="/static/logo.svg" />
+</head>
+<body>
+  <div class="app">
+    <!-- ============ Sidebar ============ -->
+    <aside class="sidebar" id="sidebar">
+      <div class="newchat-row">
+        <button class="new-chat-btn" id="new-chat-btn">
+          <span class="icon">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>
+          </span>
+          New chat
+        </button>
+        <button class="add-chat-btn" id="add-chat-btn" title="Add new chat">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>
+        </button>
+      </div>
+      <div class="sidebar-section-title">Chats</div>
+      <nav class="chat-list" id="chat-list"></nav>
+      <div class="sidebar-footer">
+        <span class="status" id="status">Connecting…</span>
+      </div>
+    </aside>
+
+    <!-- ============ Main ============ -->
+    <section class="main">
+      <header class="chat-header">
+        <button class="icon-btn toggle-sidebar" id="toggle-sidebar" title="Toggle sidebar">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M3 6h18v2H3zM3 11h18v2H3zM3 16h18v2H3z"/></svg>
+        </button>
+        <div class="logo">
+          <img src="/static/logo.svg" alt="logo" class="bot-avatar" />
+          <div class="title-stack">
+            <span class="app-name">Spike</span>
+            <span class="chat-name-pill" id="chat-title">New chat</span>
+          </div>
+        </div>
+        <div class="header-actions">
+          <div class="model-select">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2 9.5 9.5 2 12l7.5 2.5L12 22l2.5-7.5L22 12l-7.5-2.5z"/></svg>
+            <select id="model-select" title="Choose model">
+              <option value="openai/gpt-oss-120b">GPT-OSS 120B</option>
+              <option value="openai/gpt-oss-20b">GPT-OSS 20B</option>
+              <option value="qwen/qwen3.8-27b">Qwen 3.8 27B</option>
+              <option value="allam-2-7b">Allam 2 7B</option>
+            </select>
+          </div>
+          <button class="icon-btn" id="theme-btn" title="Toggle theme">
+            <svg id="theme-ico" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+              <path id="theme-path" d="M12 3a9 9 0 1 0 0 18zm0 2v14a7 7 0 0 1 0-14z"/>
+            </svg>
+          </button>
+          <button class="icon-btn" id="export-btn" title="Export / share chat">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 3 4 11h4v6h8v-6h4zM4 19h16v2H4z"/></svg>
+          </button>
+          <button class="icon-btn clear-btn" id="clear-btn" title="Clear conversation">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6 7h12l-1 14H7L6 7zm3-4h6l1 2H8l1-2z"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <!-- ============ Messages ============ -->
+      <main class="messages" id="messages">
+        <div class="msg-container">
+          <div class="empty-state" id="empty-state">
+            <img src="/static/logo.svg" alt="logo" class="empty-logo" />
+            <h2>How can I help you today?</h2>
+            <p class="sub">Your personal AI assistant powered by Groq</p>
+            <div class="suggestions">
+              <button class="suggestion"><span class="sg-ico">&#128218;</span>Explain how a chatbot works</button>
+              <button class="suggestion"><span class="sg-ico">&#128736;&#65039;</span>Help me plan a project</button>
+              <button class="suggestion"><span class="sg-ico">&#128187;</span>Write a Python function</button>
+              <button class="suggestion"><span class="sg-ico">&#127912;</span>Generate an image prompt</button>
+              <button class="suggestion"><span class="sg-ico">&#128221;</span>Proofread my text</button>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <!-- scroll to bottom FAB -->
+      <button class="scroll-fab" id="scroll-fab" title="Scroll to bottom">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M7 10l5 5 5-5z"/></svg>
+      </button>
+
+      <!-- ============ Input ============ -->
+      <div class="input-area">
+        <form class="input-form" id="input-form" autocomplete="off">
+          <textarea id="input" rows="1" placeholder="Message Spike…"></textarea>
+          <button type="button" class="mic-btn" id="mic-btn" title="Voice input" aria-label="Voice input">
+            <svg class="mic-ico" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+              <path class="mic-body" d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3z"/>
+              <path class="mic-stand" d="M5 11a7 7 0 0 0 14 0h-2a5 5 0 0 1-10 0z"/>
+            </svg>
+          </button>
+          <button type="button" class="send-btn" id="send-btn" title="Send">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M3.4 20.4 21.85 12 3.4 3.6 3.39 10l13 2-13 2z"/></svg>
+          </button>
+        </form>
+        <p class="disclaimer">Spike can make mistakes. Check important info.</p>
+      </div>
+    </section>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="/static/js/marked.min.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
