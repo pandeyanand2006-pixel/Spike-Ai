@@ -29,7 +29,7 @@ app.add_middleware(
 
 # Groq client
 client = AsyncGroq(api_key=os.getenv("GROQ_API_KEY", ""))
-MODEL = os.getenv("MODEL", "llama-3.3-70b-versatile")
+MODEL = os.getenv("MODEL", "qwen/qwen3.8-27b")
 
 SYSTEM_PROMPT = (
     "You are Spike, a brilliant, warm, and highly capable AI assistant. "
@@ -91,7 +91,7 @@ async def models():
         data = await client.models.list()
         ids = sorted(
             m.id for m in data.data
-            if not any(x in m.id for x in ("whisper", "prompt-guard", "safeguard", "orpheus", "compound"))
+            if not any(x in m.id for x in ("whisper", "prompt-guard", "safeguard", "orpheus", "compound", "gpt-oss"))
         )
         return {"models": ids}
     except Exception:
