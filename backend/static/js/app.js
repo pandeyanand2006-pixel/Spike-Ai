@@ -43,7 +43,7 @@ function ensureChat() {
   return chat;
 }
 function currentModel() {
-  return modelSelect ? modelSelect.value : "openai/gpt-oss-120b";
+  return modelSelect ? modelSelect.value : "qwen/qwen3.8-27b";
 }
 
 /* ---------- Toast ---------- */
@@ -625,8 +625,6 @@ function loadModels() {
       if (d.models && d.models.length) {
         modelSelect.innerHTML = "";
         const labels = {
-          "openai/gpt-oss-120b": "GPT-OSS 120B",
-          "openai/gpt-oss-20b": "GPT-OSS 20B",
           "qwen/qwen3.8-27b": "Qwen 3.8 27B",
           "qwen/qwen3.6-27b": "Qwen 3.6 27B",
           "allam-2-7b": "Allam 2 7B",
@@ -637,7 +635,10 @@ function loadModels() {
           o.textContent = labels[id] || id.replace(/^.*\//, "");
           modelSelect.appendChild(o);
         });
-        modelSelect.value = localStorage.getItem("model") || "openai/gpt-oss-120b";
+        const DEFAULT_MODEL = "qwen/qwen3.8-27b";
+        const saved = localStorage.getItem("model");
+        modelSelect.value = d.models.includes(saved) ? saved : DEFAULT_MODEL;
+        localStorage.setItem("model", modelSelect.value);
       }
     })
     .catch(() => {});

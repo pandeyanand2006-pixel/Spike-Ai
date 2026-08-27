@@ -615,6 +615,8 @@ textarea::placeholder { color: var(--muted); }
   .title-stack .chat-name-pill { max-width: 140px; }
   .scroll-fab { right: 16px; bottom: 120px; }
   .header-icon-btn, .icon-btn { min-width: 40px; min-height: 40px; }
+  .model-select { padding: 6px 8px; }
+  .model-select select { max-width: 110px; font-size: 12px; }
 }
 
 @media (max-width: 400px) {
