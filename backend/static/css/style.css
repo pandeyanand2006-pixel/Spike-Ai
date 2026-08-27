@@ -535,18 +535,6 @@ textarea::placeholder { color: var(--muted); }
 .icon-btn:hover { background: var(--chip-bg); color: var(--text); }
 .clear-btn:hover { color: #ef4444; }
 
-.model-select {
-  display: flex; align-items: center; gap: 6px;
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: 10px; padding: 7px 10px; color: var(--accent);
-  box-shadow: var(--shadow);
-}
-.model-select select {
-  appearance: none; -webkit-appearance: none; border: none; background: transparent;
-  color: var(--text); font-size: 13px; font-weight: 600; cursor: pointer; outline: none;
-}
-.model-select:hover { border-color: var(--accent); }
-
 /* ---------- Message actions ---------- */
 .msg-actions { display: flex; gap: 6px; margin-top: 10px; opacity: 0; transition: opacity 0.15s; }
 .msg-wrap.assistant:hover .msg-actions { opacity: 1; }
@@ -615,8 +603,6 @@ textarea::placeholder { color: var(--muted); }
   .title-stack .chat-name-pill { max-width: 140px; }
   .scroll-fab { right: 16px; bottom: 120px; }
   .header-icon-btn, .icon-btn { min-width: 40px; min-height: 40px; }
-  .model-select { padding: 6px 8px; }
-  .model-select select { max-width: 110px; font-size: 12px; }
 }
 
 @media (max-width: 400px) {

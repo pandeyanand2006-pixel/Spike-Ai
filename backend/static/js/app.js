@@ -18,7 +18,6 @@ const toggleSidebar = document.getElementById("toggle-sidebar");
 const sidebar = document.getElementById("sidebar");
 const chatTitle = document.getElementById("chat-title");
 const toastEl = document.getElementById("toast");
-const modelSelect = document.getElementById("model-select");
 const scrollFab = document.getElementById("scroll-fab");
 const micBtn = document.getElementById("mic-btn");
 
@@ -43,7 +42,7 @@ function ensureChat() {
   return chat;
 }
 function currentModel() {
-  return modelSelect ? modelSelect.value : "qwen/qwen3.8-27b";
+  return "qwen/qwen3.8-27b";
 }
 
 /* ---------- Toast ---------- */
@@ -617,33 +616,6 @@ exportBtn.addEventListener("click", () => {
   else exportText();
 });
 
-/* ---------- Model list ---------- */
-function loadModels() {
-  fetch("/api/models")
-    .then((r) => r.json())
-    .then((d) => {
-      if (d.models && d.models.length) {
-        modelSelect.innerHTML = "";
-        const labels = {
-          "qwen/qwen3.8-27b": "Qwen 3.8 27B",
-          "qwen/qwen3.6-27b": "Qwen 3.6 27B",
-          "allam-2-7b": "Allam 2 7B",
-        };
-        d.models.forEach((id) => {
-          const o = document.createElement("option");
-          o.value = id;
-          o.textContent = labels[id] || id.replace(/^.*\//, "");
-          modelSelect.appendChild(o);
-        });
-        const DEFAULT_MODEL = "qwen/qwen3.8-27b";
-        const saved = localStorage.getItem("model");
-        modelSelect.value = d.models.includes(saved) ? saved : DEFAULT_MODEL;
-        localStorage.setItem("model", modelSelect.value);
-      }
-    })
-    .catch(() => {});
-}
-
 /* ---------- Mic / voice ---------- */
 const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
 let recognition = null;
@@ -715,14 +687,9 @@ document.querySelector(".suggestions").addEventListener("click", (e) => {
   const t = e.target.closest(".suggestion");
   if (t) send(t.textContent);
 });
-modelSelect.addEventListener("change", () => {
-  localStorage.setItem("model", modelSelect.value);
-  toast("Model: " + modelSelect.selectedOptions[0].textContent);
-});
 
 /* ---------- Init ---------- */
 applyTheme(localStorage.getItem(THEME_KEY) || "auto");
 renderConversation();
 checkHealth();
-loadModels();
 setInterval(checkHealth, 30000);
