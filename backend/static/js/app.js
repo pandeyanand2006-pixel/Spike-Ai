@@ -404,29 +404,100 @@ function renderChatList() {
     const name = document.createElement("span");
     name.className = "chat-name";
     name.textContent = c.title || "New chat";
+
+    const actions = document.createElement("div");
+    actions.className = "chat-item-actions";
+    const ren = document.createElement("button");
+    ren.className = "rename";
+    ren.innerHTML = "&#9998;";
+    ren.title = "Rename";
+    ren.addEventListener("click", (e) => {
+      e.stopPropagation();
+      startRename(c, item, name);
+    });
     const del = document.createElement("button");
     del.className = "delete";
     del.innerHTML = "&#10005;";
+    del.title = "Delete";
     del.addEventListener("click", (e) => {
       e.stopPropagation();
       deleteChat(c.id);
     });
+    actions.appendChild(ren);
+    actions.appendChild(del);
+
     item.appendChild(name);
-    item.appendChild(del);
+    item.appendChild(actions);
     item.addEventListener("click", () => {
       if (busy) return;
       activeId = c.id; save(); renderConversation();
-      if (window.innerWidth <= 640) sidebar.classList.remove("open");
+      if (window.innerWidth <= 860) sidebar.classList.remove("open");
+      loadFullConversation(c);
     });
     chatListEl.appendChild(item);
   });
 }
 
+function startRename(chat, item, nameEl) {
+  if (item.querySelector(".rename-input")) return;
+  const input = document.createElement("input");
+  input.className = "rename-input";
+  input.value = chat.title || "New chat";
+  input.maxLength = 120;
+  nameEl.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const commit = async () => {
+    if (done) return;
+    done = true;
+    const v = input.value.trim();
+    if (v && v !== chat.title) {
+      chat.title = v;
+      save();
+      if (chat.backendId) {
+        try {
+          await fetch("/api/conversations/" + chat.backendId, {
+            method: "PATCH",
+            headers: authHeaders(),
+            body: JSON.stringify({ title: v }),
+          });
+        } catch (e) { /* ignore */ }
+      }
+    }
+    renderChatList();
+    renderConversation();
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); commit(); }
+    else if (e.key === "Escape") { done = true; renderChatList(); }
+  });
+  input.addEventListener("blur", commit);
+  input.addEventListener("click", (e) => e.stopPropagation());
+}
+
 function deleteChat(id) {
+  const chat = chats.find((c) => c.id === id);
   chats = chats.filter((c) => c.id !== id);
   if (activeId === id) activeId = chats.length ? chats[0].id : null;
   save(); renderChatList(); renderConversation();
+  if (chat && chat.backendId) {
+    fetch("/api/conversations/" + chat.backendId, { method: "DELETE", headers: authHeaders() })
+      .catch(() => {});
+  }
   toast("Chat deleted");
+}
+
+async function loadFullConversation(chat) {
+  if (!chat || !chat.backendId || chat.messages.length) return;
+  try {
+    const res = await fetch("/api/conversations/" + chat.backendId, { headers: authHeaders() });
+    if (!res.ok) return;
+    const data = await res.json();
+    chat.messages = (data.messages || []).map((m) => ({ role: m.role, content: m.content }));
+    save();
+    if (chat.id === activeId) renderConversation();
+  } catch (e) { /* ignore */ }
 }
 
 function updateChatTitle(chat, firstText) {
@@ -741,7 +812,7 @@ function newChat() {
   activeId = chat.id;
   save(); renderConversation();
   inputEl.focus();
-  if (window.innerWidth <= 640) sidebar.classList.remove("open");
+  if (window.innerWidth <= 860) sidebar.classList.remove("open");
 }
 
 /* ---------- Status ---------- */
@@ -976,7 +1047,10 @@ imgInput.addEventListener("change", () => {
 
 newChatBtn.addEventListener("click", newChat);
 if (addChatBtn) addChatBtn.addEventListener("click", newChat);
-toggleSidebar.addEventListener("click", () => sidebar.classList.toggle("open"));
+toggleSidebar.addEventListener("click", () => {
+  if (window.innerWidth <= 860) sidebar.classList.toggle("open");
+  else sidebar.classList.toggle("closed");
+});
 clearBtn.addEventListener("click", () => {
   if (busy) return;
   const c = getActive();
@@ -1145,6 +1219,8 @@ function loadBackendConversations() {
         }));
         activeId = chats.length ? chats[0].id : null;
         save(); renderChatList(); renderConversation();
+        const active = chats.find((x) => x.id === activeId);
+        if (active) loadFullConversation(active);
       }
     })
     .catch(() => {});
