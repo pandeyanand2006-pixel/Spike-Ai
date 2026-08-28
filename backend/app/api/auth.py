@@ -23,7 +23,21 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
-GOOGLE_USERINFO_URL = "https://www.googleapis.com/o/userinfo/v2/me"
+GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
+
+
+def _google_redirect_uri(request: Request) -> str:
+    """Build the exact redirect URI Google expects.
+
+    Behind proxies (Render) request.base_url can come back as http://, which
+    would not match the https:// URI registered in Google Cloud. Always use
+    https:// + the Host header (or an explicit GOOGLE_REDIRECT_URI env var).
+    """
+    settings = get_settings()
+    if getattr(settings, "google_redirect_uri", None):
+        return settings.google_redirect_uri
+    host = request.headers.get("host", "spike-ai.onrender.com")
+    return f"https://{host}/api/auth/google/callback"
 
 
 def _user_out(user: dict) -> UserOut:
@@ -129,7 +143,7 @@ async def google_login(request: Request):
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Google login is not configured.",
         )
-    redirect_uri = str(request.base_url).rstrip("/") + "/api/auth/google/callback"
+    redirect_uri = _google_redirect_uri(request)
     params = (
         f"client_id={settings.google_client_id}"
         f"&redirect_uri={redirect_uri}"
@@ -154,7 +168,7 @@ async def google_callback(request: Request, code: str = ""):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Missing authorization code.",
         )
-    redirect_uri = str(request.base_url).rstrip("/") + "/api/auth/google/callback"
+    redirect_uri = _google_redirect_uri(request)
     try:
         async with httpx.AsyncClient() as client:
             token_resp = await client.post(
@@ -167,18 +181,24 @@ async def google_callback(request: Request, code: str = ""):
                     "grant_type": "authorization_code",
                 },
             )
-            token_resp.raise_for_status()
+            if token_resp.status_code != 200:
+                raise Exception(
+                    f"token endpoint {token_resp.status_code}: {token_resp.text[:300]}"
+                )
             access = token_resp.json().get("access_token")
             user_resp = await client.get(
                 GOOGLE_USERINFO_URL,
                 headers={"Authorization": f"Bearer {access}"},
             )
-            user_resp.raise_for_status()
+            if user_resp.status_code != 200:
+                raise Exception(
+                    f"userinfo {user_resp.status_code}: {user_resp.text[:300]}"
+                )
             info = user_resp.json()
-    except Exception:
+    except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Google authentication failed.",
+            detail=f"Google authentication failed: {e}",
         )
 
     email = (info.get("email") or "").lower()

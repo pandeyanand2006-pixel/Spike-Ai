@@ -45,6 +45,7 @@ class Settings:
         # Optional providers (not yet wired)
         self.google_client_id = os.getenv("GOOGLE_CLIENT_ID", "")
         self.google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "")
+        self.google_redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "")
         self.web_search_api_key = os.getenv("WEB_SEARCH_API_KEY", "")
         self.image_gen_api_key = os.getenv("IMAGE_GENERATION_API_KEY", "")
 
