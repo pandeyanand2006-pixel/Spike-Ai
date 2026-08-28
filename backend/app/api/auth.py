@@ -1,6 +1,8 @@
 """Authentication endpoints."""
-from fastapi import APIRouter, Depends, HTTPException, status
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from app.config import get_settings
 from app.middleware.auth import get_current_user
 from app.models import user as user_model
 from app.schemas.auth import (
@@ -19,6 +21,10 @@ from app.db import ping
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_URL = "https://www.googleapis.com/o/userinfo/v2/me"
+
 
 def _user_out(user: dict) -> UserOut:
     return UserOut(
@@ -32,9 +38,11 @@ def _user_out(user: dict) -> UserOut:
 @router.get("/status")
 async def auth_status():
     """Report whether the authentication/database system is available."""
+    settings = get_settings()
     return {
         "enabled": True,
         "database": "connected" if await ping() else "unavailable",
+        "google": bool(settings.google_client_id and settings.google_client_secret),
     }
 
 
@@ -88,3 +96,110 @@ async def change_password(
 @router.get("/me", response_model=UserOut)
 async def me(user: dict = Depends(get_current_user)):
     return _user_out(user)
+
+
+@router.post("/forgot-password")
+async def forgot_password(req: dict):
+    """Password reset request.
+
+    NOTE: email-sending requires SMTP configuration (SMTP_HOST/SMTP_USER/
+    SMTP_PASS) which is not wired yet. Until then we return a clear,
+    honest message instead of faking a reset email.
+    """
+    settings = get_settings()
+    if not getattr(settings, "smtp_host", None):
+        return {
+            "configured": False,
+            "message": (
+                "Password reset email is not configured on the server yet. "
+                "Please contact support or set SMTP credentials."
+            ),
+        }
+    return {"configured": True, "message": "If the email exists, a reset link was sent."}
+
+
+# ---------- Google OAuth (config-gated) ----------
+
+@router.get("/google")
+async def google_login(request: Request):
+    """Begin Google OAuth. Redirects to Google if configured, else 503."""
+    settings = get_settings()
+    if not (settings.google_client_id and settings.google_client_secret):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Google login is not configured.",
+        )
+    redirect_uri = str(request.base_url).rstrip("/") + "/api/auth/google/callback"
+    params = (
+        f"client_id={settings.google_client_id}"
+        f"&redirect_uri={redirect_uri}"
+        f"&response_type=code"
+        f"&scope=openid%20email%20profile"
+        f"&access_type=offline"
+    )
+    return {"url": f"{GOOGLE_AUTH_URL}?{params}"}
+
+
+@router.get("/google/callback")
+async def google_callback(request: Request, code: str = ""):
+    """Handle Google OAuth callback, create/find user, return token."""
+    settings = get_settings()
+    if not (settings.google_client_id and settings.google_client_secret):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Google login is not configured.",
+        )
+    if not code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing authorization code.",
+        )
+    redirect_uri = str(request.base_url).rstrip("/") + "/api/auth/google/callback"
+    try:
+        async with httpx.AsyncClient() as client:
+            token_resp = await client.post(
+                GOOGLE_TOKEN_URL,
+                data={
+                    "code": code,
+                    "client_id": settings.google_client_id,
+                    "client_secret": settings.google_client_secret,
+                    "redirect_uri": redirect_uri,
+                    "grant_type": "authorization_code",
+                },
+            )
+            token_resp.raise_for_status()
+            access = token_resp.json().get("access_token")
+            user_resp = await client.get(
+                GOOGLE_USERINFO_URL,
+                headers={"Authorization": f"Bearer {access}"},
+            )
+            user_resp.raise_for_status()
+            info = user_resp.json()
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Google authentication failed.",
+        )
+
+    email = (info.get("email") or "").lower()
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google did not provide an email.",
+        )
+    user = await user_model.find_by_email(email)
+    if user is None:
+        name = info.get("name") or email.split("@")[0]
+        user = await user_model.create_user(
+            name, email, hash_password(_random_secret())
+        )
+    token = create_access_token(user["id"])
+    from fastapi.responses import RedirectResponse
+
+    return RedirectResponse(url="/#gtoken=" + token)
+
+
+def _random_secret() -> str:
+    import secrets
+
+    return secrets.token_urlsafe(24)

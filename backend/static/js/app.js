@@ -23,6 +23,7 @@ const micBtn = document.getElementById("mic-btn");
 
 /* ---------- Auth ---------- */
 const authScreen = document.getElementById("auth-screen");
+const authLoading = document.getElementById("auth-loading");
 const authForm = document.getElementById("auth-form");
 const authTitle = document.getElementById("auth-title");
 const authSub = document.getElementById("auth-sub");
@@ -36,6 +37,13 @@ const authEmail = document.getElementById("auth-email");
 const authPassword = document.getElementById("auth-password");
 const authConfirmField = document.getElementById("auth-confirm-field");
 const authConfirm = document.getElementById("auth-confirm");
+const authGoogle = document.getElementById("auth-google");
+const authForgot = document.getElementById("auth-forgot");
+const accountArea = document.getElementById("account-area");
+const accountName = document.getElementById("account-name");
+const accountEmail = document.getElementById("account-email");
+
+const appEl = document.querySelector(".app");
 
 const TOKEN_KEY = "spike_token";
 const USER_KEY = "spike_user";
@@ -54,20 +62,34 @@ function clearAuth() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(USER_KEY);
 }
+/* STATE management: only one screen visible at a time */
+function showAuthScreen(show) {
+  if (show) {
+    authScreen.classList.remove("hidden");
+    appEl.classList.add("hidden");
+    if (accountArea) accountArea.hidden = true;
+  } else {
+    authScreen.classList.add("hidden");
+    appEl.classList.remove("hidden");
+  }
+}
+function showLoading(show) {
+  if (!authLoading) return;
+  if (show) authLoading.classList.remove("hidden");
+  else authLoading.classList.add("hidden");
+}
 function authHeaders(extra) {
   const t = getToken();
   return Object.assign({ "Content-Type": "application/json" }, extra || {},
     t ? { "Authorization": "Bearer " + t } : {});
 }
-function showAuthScreen(show) {
-  if (show) { authScreen.classList.remove("hidden"); }
-  else { authScreen.classList.add("hidden"); }
-}
 function setAuthMode(mode) {
   authMode = mode;
   const signup = mode === "signup";
-  authTitle.textContent = signup ? "Create your account" : "Welcome back";
-  authSub.textContent = signup ? "Sign up to get started" : "Sign in to continue";
+  authTitle.textContent = "Welcome to Spike";
+  authSub.textContent = signup
+    ? "Create your account to get started."
+    : "Your AI assistant for thinking, creating, learning, and getting things done.";
   authSubmit.textContent = signup ? "Create account" : "Continue";
   authSwitchText.textContent = signup ? "Already have an account?" : "Don't have an account?";
   authSwitchBtn.textContent = signup ? "Sign in" : "Sign up";
@@ -773,16 +795,79 @@ document.querySelector(".suggestions").addEventListener("click", (e) => {
 const logoutBtn = document.getElementById("logout-btn");
 const logoutUser = document.getElementById("logout-user");
 
+/* STATE separation: one of [loading, auth, chat] is visible at a time. */
+
+function friendlyAuthError(err, fallback) {
+  const m = (err && err.message) || fallback || "Something went wrong. Please try again.";
+  if (/already exists/i.test(m)) return "An account with this email already exists. Try signing in.";
+  if (/incorrect email or password/i.test(m)) return "Incorrect email or password. Please try again.";
+  if (/not configured/i.test(m)) return "Google login isn't configured yet. Please use email.";
+  if (/failed|bad gateway/i.test(m)) return "Google sign-in failed. Please try again or use email.";
+  if (/missing authorization code/i.test(m)) return "Google sign-in was interrupted. Please try again.";
+  if (/did not provide an email/i.test(m)) return "Google didn't share an email. Please use email sign-in.";
+  return m;
+}
+
+function showAccount(u) {
+  if (!u) return;
+  if (logoutUser) logoutUser.textContent = u.name || "Account";
+  if (accountName) accountName.textContent = u.name || "User";
+  if (accountEmail) accountEmail.textContent = u.email || "";
+  if (accountArea) accountArea.hidden = false;
+}
+
 authSwitchBtn.addEventListener("click", () => {
   setAuthMode(authMode === "login" ? "signup" : "login");
+});
+
+authGoogle.addEventListener("click", async () => {
+  authError.textContent = "";
+  authError.style.color = "";
+  authGoogle.disabled = true;
+  try {
+    const res = await fetch("/api/auth/google");
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.url) throw new Error(data.detail || "Google login unavailable");
+    window.location.href = data.url;
+  } catch (err) {
+    authError.textContent = friendlyAuthError(err, "Google login unavailable");
+    authGoogle.disabled = false;
+  }
+});
+
+authForgot.addEventListener("click", async () => {
+  authError.textContent = "";
+  authError.style.color = "";
+  const email = authEmail.value.trim();
+  if (!email) {
+    authError.textContent = "Enter your email above, then click Forgot password.";
+    return;
+  }
+  authForgot.disabled = true;
+  try {
+    const res = await fetch("/api/auth/forgot-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    const data = await res.json().catch(() => ({}));
+    authError.style.color = "#16a34a";
+    authError.textContent = data.message || "If that email exists, a reset link was sent.";
+  } catch (err) {
+    authError.textContent = "Couldn't process that. Please try again.";
+  } finally {
+    authForgot.disabled = false;
+    setTimeout(() => { authError.style.color = ""; }, 6000);
+  }
 });
 
 authForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   authError.textContent = "";
+  authError.style.color = "";
   const email = authEmail.value.trim();
   const password = authPassword.value;
-  if (!email || !password) { authError.textContent = "Please fill in all fields."; return; }
+  if (!email || !password) { authError.textContent = "Please enter your email and password."; return; }
   if (authMode === "signup") {
     const name = authName.value.trim();
     if (!name) { authError.textContent = "Please enter your name."; return; }
@@ -795,12 +880,12 @@ authForm.addEventListener("submit", async (e) => {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name, email, password }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || "Registration failed");
       setAuth(data.access_token, data.user);
       afterLogin();
     } catch (err) {
-      authError.textContent = err.message;
+      authError.textContent = friendlyAuthError(err, "Registration failed");
     } finally {
       authSubmit.disabled = false;
       authSubmit.textContent = "Create account";
@@ -813,12 +898,12 @@ authForm.addEventListener("submit", async (e) => {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || "Login failed");
       setAuth(data.access_token, data.user);
       afterLogin();
     } catch (err) {
-      authError.textContent = err.message;
+      authError.textContent = friendlyAuthError(err, "Login failed");
     } finally {
       authSubmit.disabled = false;
       authSubmit.textContent = "Continue";
@@ -827,24 +912,22 @@ authForm.addEventListener("submit", async (e) => {
 });
 
 logoutBtn.addEventListener("click", () => {
-  if (getToken()) {
-    clearAuth();
-    chats = [];
-    activeId = null;
-    save();
-    renderChatList();
-    renderConversation();
-    setAuthUI();
-    toast("Logged out");
-  } else {
-    showAuthScreen(true);
-    setAuthMode("login");
-  }
+  clearAuth();
+  chats = [];
+  activeId = null;
+  save();
+  renderChatList();
+  renderConversation();
+  if (accountArea) accountArea.hidden = true;
+  if (logoutUser) logoutUser.textContent = "Sign in";
+  showAuthScreen(true);
+  setAuthMode("login");
+  toast("Logged out");
 });
 
 function afterLogin() {
   const u = getAuthedUser();
-  if (u && logoutUser) logoutUser.textContent = u.name || "Log out";
+  showAccount(u);
   showAuthScreen(false);
   loadBackendConversations();
   toast("Welcome, " + (u ? u.name : "back") + "!");
@@ -870,32 +953,55 @@ function loadBackendConversations() {
     .catch(() => {});
 }
 
-/* ---------- Init ---------- */
-applyTheme(localStorage.getItem(THEME_KEY) || "auto");
-renderConversation();
-checkHealth();
-setInterval(checkHealth, 30000);
-
-function setAuthUI() {
-  const u = getAuthedUser();
-  if (getToken() && u) {
-    if (logoutUser) { logoutUser.textContent = u.name || "Account"; }
-    logoutBtn.title = "Log out / Account";
-    loadBackendConversations();
-  } else {
-    if (logoutUser) { logoutUser.textContent = "Sign in"; }
-    logoutBtn.title = "Sign in to save chats";
+/* ---------- Auth state helpers ---------- */
+function tokenFromHash() {
+  if (location.hash.includes("gtoken=")) {
+    const m = location.hash.match(/gtoken=([^&]+)/);
+    const t = m ? decodeURIComponent(m[1]) : null;
+    history.replaceState(null, "", location.pathname + location.search);
+    return t;
   }
+  return null;
 }
 
-// Chat works without login. Login is optional and only persists chats / enables account.
-if (getToken() && getAuthedUser()) {
-  const u = getAuthedUser();
-  if (u && logoutUser) logoutUser.textContent = u.name || "Account";
+async function verifyAndEnter(token) {
+  const res = await fetch("/api/auth/me", { headers: { Authorization: "Bearer " + token } });
+  if (!res.ok) throw new Error("invalid");
+  const user = await res.json();
+  setAuth(token, user);
+  showAccount(user);
+  showLoading(false);
   showAuthScreen(false);
-  setAuthUI();
-} else {
-  // No login required to chat; just open the app.
-  showAuthScreen(false);
-  setAuthUI();
+  loadBackendConversations();
+  toast("Welcome, " + (user.name || "back") + "!");
 }
+
+/* ---------- Init (enforced login state machine) ---------- */
+async function init() {
+  applyTheme(localStorage.getItem(THEME_KEY) || "auto");
+  renderConversation();
+  checkHealth();
+  setInterval(checkHealth, 30000);
+
+  // Start in loading state: hide both chat and auth behind opaque overlay.
+  showLoading(true);
+  showAuthScreen(true);
+
+  const hashToken = tokenFromHash();
+  if (hashToken) {
+    try { await verifyAndEnter(hashToken); return; }
+    catch { clearAuth(); }
+  }
+  const t = getToken();
+  const u = getAuthedUser();
+  if (t && u) {
+    try { await verifyAndEnter(t); return; }
+    catch { clearAuth(); }
+  }
+
+  // Not authenticated -> STATE A: login only.
+  showLoading(false);
+  showAuthScreen(true);
+  setAuthMode("login");
+}
+init();

@@ -684,3 +684,44 @@ textarea::placeholder { color: var(--muted); }
   color: #ef4444; text-align: center; font-size: 13px;
   margin-top: 14px; min-height: 18px;
 }
+
+/* App hidden during auth states */
+.app.hidden { display: none !important; }
+
+/* Auth loading */
+.auth-loading {
+  position: fixed; inset: 0; z-index: 300;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 16px; background: var(--bg, #f7f5fb);
+  background-image: var(--bg-grad, none);
+}
+.auth-loading-logo { width: 64px; height: 64px; border-radius: 16px; box-shadow: 0 8px 24px rgba(99,102,241,0.4); animation: pulse 1.6s ease-in-out infinite; }
+.auth-loading-text { color: var(--text-2, #5b5876); font-size: 14px; }
+.auth-loading.hidden { display: none; }
+
+/* Google + divider */
+.auth-google {
+  width: 100%; box-sizing: border-box; display: flex; align-items: center; justify-content: center; gap: 10px;
+  padding: 12px 14px; margin-bottom: 6px; font-size: 14.5px; font-weight: 600;
+  color: var(--text, #1c1a2e); background: var(--surface, #fff);
+  border: 1px solid var(--border, #e7e4f2); border-radius: 11px; cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+.auth-google:hover { border-color: var(--accent, #6366f1); background: var(--surface-2, #f1eff7); }
+.auth-google:active { transform: scale(0.99); }
+.auth-google svg { flex-shrink: 0; }
+.auth-divider {
+  display: flex; align-items: center; text-align: center; margin: 18px 0 16px;
+  color: var(--text-2, #9b98b5); font-size: 12px; font-weight: 600; letter-spacing: 0.06em;
+}
+.auth-divider::before, .auth-divider::after {
+  content: ""; flex: 1; height: 1px; background: var(--border, #e7e4f2);
+}
+.auth-divider span { padding: 0 12px; }
+.auth-forgot { display: block; width: 100%; margin: 14px 0 4px; text-align: center; }
+
+/* Account area in sidebar */
+.account-area { display: flex; align-items: center; padding: 0 2px; }
+.account-info { min-width: 0; }
+.account-name { font-size: 13px; font-weight: 700; color: var(--text, #1c1a2e); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.account-email { font-size: 11.5px; color: var(--text-2, #5b5876); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
