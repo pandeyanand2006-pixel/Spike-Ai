@@ -14,9 +14,11 @@ const emptyState = document.getElementById("empty-state");
 const chatListEl = document.getElementById("chat-list");
 
 /* ---------- Composer tools (image / ppt / attach) ---------- */
-const attachBtn = document.getElementById("attach-btn");
-const imgGenBtn = document.getElementById("img-gen-btn");
-const pptBtn = document.getElementById("ppt-btn");
+const plusBtn = document.getElementById("plus-btn");
+const toolsPopover = document.getElementById("tools-popover");
+const popAttach = document.getElementById("pop-attach");
+const popImage = document.getElementById("pop-image");
+const popPpt = document.getElementById("pop-ppt");
 const imgInput = document.getElementById("img-input");
 const attachPreview = document.getElementById("attach-preview");
 const attachThumb = document.getElementById("attach-thumb");
@@ -910,24 +912,54 @@ function updateSendState() {
   sendBtn.classList.toggle("has-text", !!inputEl.value.trim());
 }
 
-/* ---------- Composer tools wiring ---------- */
+/* ---------- Composer tools wiring (single + popover) ---------- */
 function clearComposerState() {
   attachedImage = null;
   composerMode = "chat";
   attachPreview.hidden = true;
   attachThumb.removeAttribute("src");
-  imgGenBtn.classList.remove("active");
-  pptBtn.classList.remove("active");
+  plusBtn.classList.remove("active");
+  closePopover();
 }
 
 function setMode(mode) {
   composerMode = mode;
-  imgGenBtn.classList.toggle("active", mode === "image");
-  pptBtn.classList.toggle("active", mode === "ppt");
+  plusBtn.classList.toggle("active", mode !== "chat");
   inputEl.focus();
 }
 
-attachBtn.addEventListener("click", () => imgInput.click());
+function openPopover() {
+  toolsPopover.hidden = false;
+  plusBtn.classList.add("active");
+}
+function closePopover() {
+  toolsPopover.hidden = true;
+  if (composerMode === "chat") plusBtn.classList.remove("active");
+}
+
+plusBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (toolsPopover.hidden) openPopover(); else closePopover();
+});
+document.addEventListener("click", (e) => {
+  if (!toolsPopover.hidden && !toolsPopover.contains(e.target) && e.target !== plusBtn) {
+    closePopover();
+  }
+});
+
+popAttach.addEventListener("click", () => {
+  closePopover();
+  imgInput.click();
+});
+popImage.addEventListener("click", () => {
+  closePopover();
+  setMode(composerMode === "image" ? "chat" : "image");
+});
+popPpt.addEventListener("click", () => {
+  closePopover();
+  setMode(composerMode === "ppt" ? "chat" : "ppt");
+});
+
 imgInput.addEventListener("change", () => {
   const file = imgInput.files && imgInput.files[0];
   if (!file) return;
@@ -945,12 +977,6 @@ attachRemove.addEventListener("click", () => {
   attachedImage = null;
   attachPreview.hidden = true;
   attachThumb.removeAttribute("src");
-});
-imgGenBtn.addEventListener("click", () => {
-  setMode(composerMode === "image" ? "chat" : "image");
-});
-pptBtn.addEventListener("click", () => {
-  setMode(composerMode === "ppt" ? "chat" : "ppt");
 });
 
 newChatBtn.addEventListener("click", newChat);

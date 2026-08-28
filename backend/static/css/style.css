@@ -772,3 +772,33 @@ textarea::placeholder { color: var(--muted); }
 .ppt-info { flex: 1; min-width: 0; }
 .ppt-title { font-weight: 700; color: var(--text, #1c1a2e); font-size: 15px; }
 .ppt-sub { font-size: 12.5px; color: var(--text-2, #5b5876); }
+
+/* Composer + button + tools popover (ChatGPT-style, left of input) */
+.input-form { position: relative; }
+.plus-btn {
+  flex: 0 0 auto; width: 40px; height: 40px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border, #e7e4f2); background: var(--surface, #fff);
+  color: var(--text-2, #5b5876); cursor: pointer; transition: border-color 0.15s, background 0.15s, transform 0.1s;
+}
+.plus-btn:hover { border-color: var(--accent, #6366f1); color: var(--accent, #6366f1); background: var(--surface-2, #f1eff7); }
+.plus-btn:active { transform: scale(0.96); }
+.plus-btn.active { border-color: var(--accent, #6366f1); color: #fff; background: var(--accent-grad, linear-gradient(135deg,#6366f1,#8b5cf6)); }
+
+.tools-popover {
+  position: absolute; bottom: calc(100% + 10px); left: 0; z-index: 30;
+  background: var(--surface, #fff); border: 1px solid var(--border, #e7e4f2);
+  border-radius: 14px; box-shadow: 0 16px 40px rgba(20,16,50,0.18);
+  padding: 6px; min-width: 230px; display: flex; flex-direction: column; gap: 2px;
+}
+.tools-popover[hidden] { display: none; }
+.pop-item {
+  display: flex; align-items: center; gap: 12px; text-align: left;
+  padding: 11px 12px; border: none; background: none; border-radius: 10px;
+  cursor: pointer; color: var(--text, #1c1a2e); font-size: 14px; font-weight: 600;
+  transition: background 0.12s;
+}
+.pop-item:hover { background: var(--surface-2, #f1eff7); }
+.pop-ico { font-size: 18px; line-height: 1; }
+.pop-item span { display: flex; flex-direction: column; }
+.pop-item small { font-weight: 500; color: var(--text-2, #5b5876); font-size: 11.5px; margin-top: 1px; }
