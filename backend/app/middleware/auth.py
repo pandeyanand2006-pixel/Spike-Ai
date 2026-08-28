@@ -1,4 +1,6 @@
 """Authentication dependency for protected routes."""
+from typing import Optional
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -31,3 +33,15 @@ async def get_current_user(
             detail="User not found",
         )
     return user
+
+
+async def optional_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+) -> Optional[dict]:
+    """Same as get_current_user but returns None when unauthenticated (chat still works)."""
+    if credentials is None:
+        return None
+    user_id = decode_token(credentials.credentials)
+    if user_id is None:
+        return None
+    return await find_by_id(user_id)

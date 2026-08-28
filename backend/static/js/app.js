@@ -827,14 +827,19 @@ authForm.addEventListener("submit", async (e) => {
 });
 
 logoutBtn.addEventListener("click", () => {
-  clearAuth();
-  chats = [];
-  activeId = null;
-  save();
-  renderChatList();
-  renderConversation();
-  showAuthScreen(true);
-  setAuthMode("login");
+  if (getToken()) {
+    clearAuth();
+    chats = [];
+    activeId = null;
+    save();
+    renderChatList();
+    renderConversation();
+    setAuthUI();
+    toast("Logged out");
+  } else {
+    showAuthScreen(true);
+    setAuthMode("login");
+  }
 });
 
 function afterLogin() {
@@ -871,12 +876,26 @@ renderConversation();
 checkHealth();
 setInterval(checkHealth, 30000);
 
-if (getToken()) {
+function setAuthUI() {
   const u = getAuthedUser();
-  if (u && logoutUser) logoutUser.textContent = u.name || "Log out";
+  if (getToken() && u) {
+    if (logoutUser) { logoutUser.textContent = u.name || "Account"; }
+    logoutBtn.title = "Log out / Account";
+    loadBackendConversations();
+  } else {
+    if (logoutUser) { logoutUser.textContent = "Sign in"; }
+    logoutBtn.title = "Sign in to save chats";
+  }
+}
+
+// Chat works without login. Login is optional and only persists chats / enables account.
+if (getToken() && getAuthedUser()) {
+  const u = getAuthedUser();
+  if (u && logoutUser) logoutUser.textContent = u.name || "Account";
   showAuthScreen(false);
-  loadBackendConversations();
+  setAuthUI();
 } else {
-  showAuthScreen(true);
-  setAuthMode("login");
+  // No login required to chat; just open the app.
+  showAuthScreen(false);
+  setAuthUI();
 }
