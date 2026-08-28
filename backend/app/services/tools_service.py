@@ -1,4 +1,5 @@
 """Tool services: image generation and presentation (PPT/PDF) generation."""
+import base64
 import re
 from pathlib import Path
 from typing import List
@@ -11,16 +12,70 @@ from app.config import get_settings
 from app.services.ai_service import ai_service
 
 
-async def generate_image(prompt: str) -> str:
-    """Generate an image via Pollinations (no key) and store it locally.
+async def _save_image_bytes(data: bytes, settings) -> str:
+    folder = settings.generated_dir / "images"
+    folder.mkdir(parents=True, exist_ok=True)
+    fname = uuid4().hex + ".png"
+    (folder / fname).write_bytes(data)
+    return "/static/generated/images/" + fname
 
-    Returns the local static URL of the generated image.
+
+async def _generate_image_openai(prompt: str, api_key: str) -> bytes:
+    """Generate an image via OpenAI's images API (DALL·E). Returns raw PNG bytes."""
+    settings = get_settings()
+    base = (settings.image_gen_base_url or "https://api.openai.com/v1").rstrip("/")
+    url = base + "/images/generations"
+    headers = {
+        "Authorization": "Bearer " + api_key,
+        "Content-Type": "application/json",
+    }
+    # Try the common models in order; first that works wins.
+    for model in ("dall-e-3", "gpt-image-1"):
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.post(
+                    url,
+                    headers=headers,
+                    json={
+                        "model": model,
+                        "prompt": prompt,
+                        "n": 1,
+                        "size": "1024x1024",
+                        "response_format": "b64_json",
+                    },
+                )
+                if resp.status_code != 200:
+                    continue
+                b64 = resp.json()["data"][0]["b64_json"]
+                return base64.b64decode(b64)
+        except Exception:
+            continue
+    raise RuntimeError("OpenAI image model unavailable (dall-e-3 / gpt-image-1)")
+
+
+async def generate_image(prompt: str) -> str:
+    """Generate an image and store it locally, returning its static URL.
+
+    Uses OpenAI's image API when a key is available (IMAGE_GENERATION_API_KEY,
+    falling back to VISION_API_KEY). Otherwise falls back to Pollinations.
     """
     settings = get_settings()
     prompt = (prompt or "").strip()
     if not prompt:
         raise HTTPException(status_code=400, detail="Image prompt is required.")
 
+    api_key = settings.image_gen_api_key or settings.vision_api_key
+    if api_key:
+        try:
+            data = await _generate_image_openai(prompt, api_key)
+            return await _save_image_bytes(data, settings)
+        except Exception as e:
+            raise HTTPException(
+                status_code=502,
+                detail="Image generation failed: " + str(e)[:160],
+            )
+
+    # No key: best-effort Pollinations (works where DNS resolves).
     url = (
         "https://image.pollinations.xyz/"
         + re.sub(r"\s+", "-", prompt)[:1200]
@@ -36,12 +91,7 @@ async def generate_image(prompt: str) -> str:
             status_code=502,
             detail="Image generation failed (upstream unavailable). " + str(e)[:120],
         )
-
-    folder = settings.generated_dir / "images"
-    folder.mkdir(parents=True, exist_ok=True)
-    fname = uuid4().hex + ".png"
-    (folder / fname).write_bytes(data)
-    return "/static/generated/images/" + fname
+    return await _save_image_bytes(data, settings)
 
 
 def _build_pptx(out_path: Path, title: str, slides: List[dict]):

@@ -56,6 +56,10 @@ class Settings:
         )
         self.vision_model = os.getenv("VISION_MODEL", "openai")
         self.vision_api_key = os.getenv("VISION_API_KEY", "")
+        self.image_gen_api_key = os.getenv("IMAGE_GENERATION_API_KEY", "")
+        self.image_gen_base_url = os.getenv(
+            "IMAGE_GEN_BASE_URL", "https://api.openai.com/v1"
+        )
 
     @property
     def generated_dir(self) -> Path:
