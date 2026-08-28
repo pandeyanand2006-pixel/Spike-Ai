@@ -1286,6 +1286,10 @@ async function refreshAuthConfig() {
     const showGoogle = !!(data && data.google);
     if (authGoogle) authGoogle.style.display = showGoogle ? "" : "none";
     if (authDivider) authDivider.style.display = showGoogle ? "" : "none";
+    const showImage = !!(data && data.image);
+    if (popImage) popImage.style.display = showImage ? "" : "none";
+    const sgImage = document.getElementById("sg-image");
+    if (sgImage) sgImage.style.display = showImage ? "" : "none";
   } catch (e) { /* leave defaults */ }
 }
 init();

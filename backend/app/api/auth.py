@@ -57,6 +57,7 @@ async def auth_status():
         "enabled": True,
         "database": "connected" if await ping() else "unavailable",
         "google": bool(settings.google_client_id and settings.google_client_secret),
+        "image": bool(settings.image_gen_api_key or settings.vision_api_key),
     }
 
 
