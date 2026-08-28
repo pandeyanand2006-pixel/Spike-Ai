@@ -742,6 +742,7 @@ textarea::placeholder { color: var(--muted); }
 
 /* Attached image preview */
 .attach-preview { position: relative; display: inline-block; margin-bottom: 8px; }
+.attach-preview[hidden] { display: none; }
 .attach-preview img { max-height: 96px; max-width: 160px; border-radius: 10px; border: 1px solid var(--border, #e7e4f2); display: block; }
 .attach-remove {
   position: absolute; top: -8px; right: -8px; width: 22px; height: 22px; border-radius: 50%;
