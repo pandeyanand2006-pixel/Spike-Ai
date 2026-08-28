@@ -13,6 +13,8 @@ class ChatRequest(BaseModel):
     temperature: Optional[float] = 0.7
     model: Optional[str] = None
     conversationId: Optional[str] = None
+    mode: Optional[str] = None  # "chat" | "image" | "ppt"
+    image: Optional[str] = None  # base64 data URL of an attached image
 
 
 class ChatResponse(BaseModel):

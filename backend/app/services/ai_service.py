@@ -1,6 +1,9 @@
 """AI service wrapping the Groq client."""
+import json
+import re
 from typing import AsyncGenerator, List, Optional
 
+import httpx
 from fastapi import HTTPException
 from groq import AsyncGroq
 
@@ -79,6 +82,91 @@ class AIService:
                     yield delta
         except Exception as e:
             yield f"\n\n[Error: {e}]"
+
+    async def vision_complete(
+        self, text: str, image_data_url: str, max_tokens: int = 2000
+    ) -> str:
+        """Answer a text prompt that includes an attached image (vision)."""
+        settings = get_settings()
+        url = settings.vision_base_url.rstrip("/") + "/chat/completions"
+        headers = {"Content-Type": "application/json"}
+        if settings.vision_api_key:
+            headers["Authorization"] = "Bearer " + settings.vision_api_key
+        payload = {
+            "model": settings.vision_model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": text},
+                        {"type": "image_url", "image_url": {"url": image_data_url}},
+                    ],
+                }
+            ],
+            "max_tokens": max_tokens,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=90) as client:
+                resp = await client.post(url, headers=headers, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+            return data["choices"][0]["message"]["content"] or ""
+        except Exception as e:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Image understanding is unavailable. Set VISION_BASE_URL / "
+                    "VISION_API_KEY (e.g. an OpenAI-compatible vision endpoint) to enable it. ("
+                    + str(e)[:120]
+                    + ")"
+                ),
+            )
+
+    async def outline_presentation(self, topic: str, slides: int = 6) -> List[dict]:
+        """Use the LLM to produce a structured presentation outline as JSON."""
+        sys = (
+            "You are a presentation designer. Given a topic, return ONLY valid JSON: "
+            "a list of slide objects, each with 'title' (string) and 'bullets' (list of "
+            "short strings, 3-6 each). Do not include markdown or commentary."
+        )
+        user = (
+            f"Create a {slides}-slide presentation outline about: {topic}\n"
+            "Return JSON only."
+        )
+        raw = await self.complete(
+            [{"role": "user", "content": user}],
+            temperature=0.6,
+            system_prompt=sys,
+        )
+        try:
+            raw = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.I).strip()
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                data = data.get("slides", data.get("outline", []))
+            return [d for d in data if isinstance(d, dict) and d.get("title")]
+        except Exception:
+            # Fallback: a single slide with the topic
+            return [{"title": topic, "bullets": ["Overview", "Key points", "Summary"]}]
+
+
+def detect_tool(text: str) -> Optional[str]:
+    """Lightweight intent detection for image / ppt generation from free text."""
+    t = (text or "").lower()
+    if re.search(
+        r"\b(generate|create|make|draw|produce|render|design)\b.{0,25}"
+        r"\b(image|picture|photo|art|illustration|drawing|wallpaper|logo|poster)\b",
+        t,
+    ):
+        return "image"
+    if re.search(
+        r"\b(make|create|build|generate|prepare|give me)\b.{0,25}"
+        r"\b(ppt|presentation|slides?|powerpoint|deck)\b",
+        t,
+    ):
+        return "ppt"
+    if re.search(r"\bpresentation\b.{0,20}\b(on|about|for)\b", t):
+        return "ppt"
+    return None
 
 
 ai_service = AIService()

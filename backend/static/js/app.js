@@ -12,6 +12,18 @@ const clearBtn = document.getElementById("clear-btn");
 const statusEl = document.getElementById("status");
 const emptyState = document.getElementById("empty-state");
 const chatListEl = document.getElementById("chat-list");
+
+/* ---------- Composer tools (image / ppt / attach) ---------- */
+const attachBtn = document.getElementById("attach-btn");
+const imgGenBtn = document.getElementById("img-gen-btn");
+const pptBtn = document.getElementById("ppt-btn");
+const imgInput = document.getElementById("img-input");
+const attachPreview = document.getElementById("attach-preview");
+const attachThumb = document.getElementById("attach-thumb");
+const attachRemove = document.getElementById("attach-remove");
+const TOOL_PREFIX = "__TOOL__::";
+let attachedImage = null;   // base64 data URL of an uploaded image
+let composerMode = "chat";  // "chat" | "image" | "ppt"
 const newChatBtn = document.getElementById("new-chat-btn");
 const addChatBtn = document.getElementById("add-chat-btn");
 const toggleSidebar = document.getElementById("toggle-sidebar");
@@ -158,7 +170,7 @@ function renderMarkdown(text) {
 const ASSISTANT_AVATAR =
   `<div class="avatar"><img src="/static/logo.svg" alt="ai" /></div>`;
 
-function addUserMsg(text) {
+function addUserMsg(text, image) {
   const wrap = document.createElement("div");
   wrap.className = "msg-wrap user";
   const inner = document.createElement("div");
@@ -169,6 +181,13 @@ function addUserMsg(text) {
   const bubble = document.createElement("div");
   bubble.className = "user-bubble";
   bubble.textContent = text;
+  if (image) {
+    const img = document.createElement("img");
+    img.className = "user-img";
+    img.src = image;
+    img.alt = "attachment";
+    bubble.appendChild(img);
+  }
   const time = document.createElement("div");
   time.className = "time";
   time.textContent = nowTime();
@@ -200,6 +219,88 @@ function addAssistantShell() {
   wrap.appendChild(time);
   msgContainer.appendChild(wrap);
   return wrap;
+}
+
+/* ---------- Tool result cards (image / ppt) ---------- */
+function renderToolCard(tool) {
+  const card = document.createElement("div");
+  card.className = "tool-card" + (tool.type === "ppt" ? " ppt-card" : "");
+  if (tool.type === "image") {
+    const img = document.createElement("img");
+    img.className = "tool-img";
+    img.src = tool.url;
+    img.alt = tool.prompt || "generated image";
+    card.appendChild(img);
+    const actions = document.createElement("div");
+    actions.className = "tool-actions";
+    actions.appendChild(makeDlBtn(tool.url, "⬇ Download image"));
+    card.appendChild(actions);
+  } else if (tool.type === "ppt") {
+    const ico = document.createElement("div");
+    ico.className = "ppt-icon";
+    ico.textContent = "📊";
+    const info = document.createElement("div");
+    info.className = "ppt-info";
+    const title = document.createElement("div");
+    title.className = "ppt-title";
+    title.textContent = tool.title || "Presentation";
+    const sub = document.createElement("div");
+    sub.className = "ppt-sub";
+    sub.textContent = (tool.slides || 0) + " slides";
+    info.appendChild(title);
+    info.appendChild(sub);
+    const actions = document.createElement("div");
+    actions.className = "tool-actions";
+    actions.appendChild(makeDlBtn(tool.pptx, "⬇ PPT"));
+    if (tool.pdf) actions.appendChild(makeDlBtn(tool.pdf, "⬇ PDF"));
+    card.appendChild(ico);
+    card.appendChild(info);
+    card.appendChild(actions);
+  }
+  return card;
+}
+
+function makeDlBtn(href, label) {
+  const a = document.createElement("a");
+  a.className = "dl-btn";
+  a.href = href;
+  a.textContent = label;
+  a.setAttribute("download", "");
+  a.target = "_blank";
+  return a;
+}
+
+function addToolMessage(tool) {
+  const wrap = document.createElement("div");
+  wrap.className = "msg-wrap assistant";
+  const time = document.createElement("div");
+  time.className = "time";
+  time.textContent = nowTime();
+  wrap.innerHTML =
+    ASSISTANT_AVATAR +
+    `<div class="msg-body"><div class="role-label">Spike</div><div class="msg-content"></div></div>`;
+  wrap.querySelector(".msg-content").appendChild(renderToolCard(tool));
+  wrap.appendChild(time);
+  msgContainer.appendChild(wrap);
+  scrollBottom();
+  return wrap;
+}
+
+function renderStoredMessage(m) {
+  const role = m.role;
+  const text = m.content || "";
+  if (role === "user") {
+    addUserMsg(text, m.image || null);
+    return;
+  }
+  if (role === "assistant" && text.startsWith(TOOL_PREFIX)) {
+    try {
+      const tool = JSON.parse(text.slice(TOOL_PREFIX.length));
+      addToolMessage(tool);
+      return;
+    } catch (e) { /* fall through to normal render */ }
+  }
+  renderStored(role, text);
 }
 
 function renderStored(role, text) {
@@ -344,7 +445,7 @@ function renderConversation() {
   chatTitle.textContent = chat ? (chat.title || "New chat") : "New chat";
   if (chat && chat.messages.length) {
     emptyState.style.display = "none";
-    chat.messages.forEach((m) => renderStored(m.role, m.content));
+    chat.messages.forEach((m) => renderStoredMessage(m));
   } else {
     emptyState.style.display = "flex";
   }
@@ -386,7 +487,7 @@ function send(textOverride) {
   lastUserMsg = text;
 
   chat.messages.push({ role: "user", content: text });
-  addUserMsg(text);
+  addUserMsg(text, attachedImage);
   chatTitle.textContent = chat.title || "New chat";
   updateChatTitle(chat, text);
 
@@ -397,7 +498,17 @@ function send(textOverride) {
   autoResize();
   inputEl.disabled = true;
 
-  const history = chat.messages.filter((m) => m.role !== "error");
+  // Build request payload with optional image attachment / tool mode
+  const payload = {
+    messages: chat.messages.filter((m) => m.role !== "error"),
+    model: currentModel(),
+    conversationId: chat.backendId || null,
+  };
+  if (attachedImage) payload.image = attachedImage;
+  if (composerMode === "image" || composerMode === "ppt") payload.mode = composerMode;
+
+  // Reset composer state for the next message
+  clearComposerState();
 
   activeController = new AbortController();
 
@@ -406,11 +517,7 @@ function send(textOverride) {
       const res = await fetch("/api/chat/stream", {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify({
-          messages: history,
-          model: currentModel(),
-          conversationId: chat.backendId || null,
-        }),
+        body: JSON.stringify(payload),
         signal: activeController.signal,
       });
 
@@ -428,8 +535,9 @@ function send(textOverride) {
       }
 
       removeTyping();
-      const shell = addAssistantShell();
-      const contentEl = shell.querySelector(".msg-content");
+      let shell = null;
+      let contentEl = null;
+      let toolHandled = false;
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let full = "";
@@ -440,11 +548,11 @@ function send(textOverride) {
       const render = () => {
         pending = false;
         const html = renderMarkdown(full);
-        if (contentEl.innerHTML !== html) contentEl.innerHTML = html;
+        if (contentEl && contentEl.innerHTML !== html) contentEl.innerHTML = html;
         scrollBottom();
       };
       const scheduleRender = () => {
-        if (pending) return;
+        if (pending || !contentEl) return;
         pending = true;
         requestAnimationFrame(render);
       };
@@ -462,6 +570,17 @@ function send(textOverride) {
             let data;
             try { data = JSON.parse(line); } catch (e) { continue; }
             if (data.error) throw new Error(data.error);
+            if (data.tool) {
+              toolHandled = true;
+              addToolMessage(data.tool);
+              chat.messages.push({
+                role: "assistant",
+                content: TOOL_PREFIX + JSON.stringify(data.tool),
+              });
+              save();
+              continue;
+            }
+            if (!shell) { shell = addAssistantShell(); contentEl = shell.querySelector(".msg-content"); }
             full += data.token || "";
           }
           scheduleRender();
@@ -470,7 +589,18 @@ function send(textOverride) {
           try {
             const data = JSON.parse(buffer.trim());
             if (data.error) throw new Error(data.error);
-            full += data.token || "";
+            if (data.tool) {
+              toolHandled = true;
+              addToolMessage(data.tool);
+              chat.messages.push({
+                role: "assistant",
+                content: TOOL_PREFIX + JSON.stringify(data.tool),
+              });
+              save();
+            } else if (!shell) {
+              shell = addAssistantShell(); contentEl = shell.querySelector(".msg-content");
+              full += data.token || "";
+            }
           } catch (e) {}
         }
       } catch (err) {
@@ -478,15 +608,17 @@ function send(textOverride) {
         else throw err;
       }
 
-      contentEl.classList.remove("stream-cursor");
-      if (stopped) {
-        contentEl.innerHTML = renderMarkdown(full) + `<span class="stopped-note"> · stopped</span>`;
-      } else {
-        contentEl.innerHTML = renderMarkdown(full);
-        chat.messages.push({ role: "assistant", content: full });
-        addActions(shell, full);
-        save();
-        updateChatTitle(chat, full);
+      if (shell && contentEl) {
+        contentEl.classList.remove("stream-cursor");
+        if (stopped) {
+          contentEl.innerHTML = renderMarkdown(full) + `<span class="stopped-note"> · stopped</span>`;
+        } else {
+          contentEl.innerHTML = renderMarkdown(full);
+          chat.messages.push({ role: "assistant", content: full });
+          addActions(shell, full);
+          save();
+          updateChatTitle(chat, full);
+        }
       }
       scrollBottom();
     } catch (err) {
@@ -777,6 +909,50 @@ inputEl.addEventListener("input", updateSendState);
 function updateSendState() {
   sendBtn.classList.toggle("has-text", !!inputEl.value.trim());
 }
+
+/* ---------- Composer tools wiring ---------- */
+function clearComposerState() {
+  attachedImage = null;
+  composerMode = "chat";
+  attachPreview.hidden = true;
+  attachThumb.removeAttribute("src");
+  imgGenBtn.classList.remove("active");
+  pptBtn.classList.remove("active");
+}
+
+function setMode(mode) {
+  composerMode = mode;
+  imgGenBtn.classList.toggle("active", mode === "image");
+  pptBtn.classList.toggle("active", mode === "ppt");
+  inputEl.focus();
+}
+
+attachBtn.addEventListener("click", () => imgInput.click());
+imgInput.addEventListener("change", () => {
+  const file = imgInput.files && imgInput.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    attachedImage = reader.result;
+    attachThumb.src = attachedImage;
+    attachPreview.hidden = false;
+    setMode("chat"); // attached image = vision chat (not generation)
+  };
+  reader.readAsDataURL(file);
+  imgInput.value = "";
+});
+attachRemove.addEventListener("click", () => {
+  attachedImage = null;
+  attachPreview.hidden = true;
+  attachThumb.removeAttribute("src");
+});
+imgGenBtn.addEventListener("click", () => {
+  setMode(composerMode === "image" ? "chat" : "image");
+});
+pptBtn.addEventListener("click", () => {
+  setMode(composerMode === "ppt" ? "chat" : "ppt");
+});
+
 newChatBtn.addEventListener("click", newChat);
 if (addChatBtn) addChatBtn.addEventListener("click", newChat);
 toggleSidebar.addEventListener("click", () => sidebar.classList.toggle("open"));
