@@ -476,6 +476,19 @@ function send(textOverride) {
         inputEl.focus();
         return;
       }
+      // Handle auth failure: clear the bad token and force re-login
+      if (err.message && err.message.indexOf("Not authenticated") !== -1) {
+        clearAuth();
+        busy = false;
+        sendBtn.disabled = false;
+        sendBtn.classList.remove("busy");
+        inputEl.disabled = false;
+        showAuthScreen(true);
+        setAuthMode("login");
+        authError.textContent = "Your session expired. Please sign in again.";
+        toast("Please sign in to continue");
+        return;
+      }
       const shell = addAssistantShell();
       const contentEl = shell.querySelector(".msg-content");
       contentEl.classList.remove("stream-cursor");
