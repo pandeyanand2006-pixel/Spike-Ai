@@ -75,7 +75,7 @@ html, body {
 
 body { background-image: var(--bg-grad); background-attachment: fixed; }
 
-.app { display: flex; height: 100vh; overflow: hidden; }
+.app { display: flex; height: 100dvh; overflow: hidden; position: relative; }
 
 /* ---------- Sidebar ---------- */
 .sidebar {
@@ -612,8 +612,10 @@ textarea::placeholder { color: var(--muted); }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
 @media (max-width: 860px) {
-  .sidebar { position: absolute; left: -280px; z-index: 20; height: 100%; transition: left 0.25s; box-shadow: var(--shadow-lg); }
+  .sidebar { position: absolute; left: -280px; z-index: 56; height: 100%; transition: left 0.25s; box-shadow: var(--shadow-lg); background: var(--surface); }
   .sidebar.open { left: 0; }
+  .sidebar-backdrop { position: fixed; inset: 0; background: rgba(10, 8, 20, 0.45); z-index: 55; display: none; }
+  .sidebar-backdrop.show { display: block; }
   .assistant .avatar { display: none; }
   .msg-wrap.assistant { gap: 6px; }
   .msg-container { padding: 0 16px; }

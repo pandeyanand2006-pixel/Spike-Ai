@@ -27,6 +27,7 @@ const newChatBtn = document.getElementById("new-chat-btn");
 const addChatBtn = document.getElementById("add-chat-btn");
 const toggleSidebar = document.getElementById("toggle-sidebar");
 const sidebar = document.getElementById("sidebar");
+const sidebarBackdrop = document.getElementById("sidebar-backdrop");
 const chatTitle = document.getElementById("chat-title");
 const toastEl = document.getElementById("toast");
 const scrollFab = document.getElementById("scroll-fab");
@@ -431,7 +432,10 @@ function renderChatList() {
     item.addEventListener("click", () => {
       if (busy) return;
       activeId = c.id; save(); renderConversation();
-      if (window.innerWidth <= 860) sidebar.classList.remove("open");
+      if (window.innerWidth <= 860) {
+        sidebar.classList.remove("open");
+        if (sidebarBackdrop) sidebarBackdrop.classList.remove("show");
+      }
       loadFullConversation(c);
     });
     chatListEl.appendChild(item);
@@ -812,7 +816,10 @@ function newChat() {
   activeId = chat.id;
   save(); renderConversation();
   inputEl.focus();
-  if (window.innerWidth <= 860) sidebar.classList.remove("open");
+  if (window.innerWidth <= 860) {
+    sidebar.classList.remove("open");
+    if (sidebarBackdrop) sidebarBackdrop.classList.remove("show");
+  }
 }
 
 /* ---------- Status ---------- */
@@ -1048,8 +1055,25 @@ imgInput.addEventListener("change", () => {
 newChatBtn.addEventListener("click", newChat);
 if (addChatBtn) addChatBtn.addEventListener("click", newChat);
 toggleSidebar.addEventListener("click", () => {
-  if (window.innerWidth <= 860) sidebar.classList.toggle("open");
-  else sidebar.classList.toggle("closed");
+  if (window.innerWidth <= 860) {
+    const willOpen = !sidebar.classList.contains("open");
+    sidebar.classList.toggle("open", willOpen);
+    if (sidebarBackdrop) sidebarBackdrop.classList.toggle("show", willOpen);
+  } else {
+    sidebar.classList.toggle("closed");
+  }
+});
+if (sidebarBackdrop) {
+  sidebarBackdrop.addEventListener("click", () => {
+    sidebar.classList.remove("open");
+    sidebarBackdrop.classList.remove("show");
+  });
+}
+window.addEventListener("resize", () => {
+  if (window.innerWidth > 860) {
+    sidebar.classList.remove("open");
+    if (sidebarBackdrop) sidebarBackdrop.classList.remove("show");
+  }
 });
 clearBtn.addEventListener("click", () => {
   if (busy) return;
