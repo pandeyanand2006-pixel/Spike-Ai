@@ -655,7 +655,16 @@ textarea::placeholder { color: var(--muted); }
   border-radius: 20px; padding: 40px 34px;
   box-shadow: var(--shadow-lg, 0 10px 40px rgba(28,26,46,0.12));
   box-sizing: border-box;
+  position: relative;
 }
+.auth-close {
+  position: absolute; top: 14px; right: 14px;
+  width: 34px; height: 34px; border-radius: 50%;
+  border: 1px solid var(--border, #e7e4f2); background: var(--surface-2, #f1eff7);
+  color: var(--text-2, #5b5876); font-size: 15px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; transition: all 0.15s;
+}
+.auth-close:hover { color: var(--text, #1c1a2e); border-color: var(--accent, #6366f1); }
 .auth-logo {
   width: 60px; height: 60px; border-radius: 16px; margin: 0 auto 20px; display: block;
   box-shadow: 0 8px 22px rgba(99,102,241,0.4);

@@ -23,6 +23,7 @@ const imgInput = document.getElementById("img-input");
 const TOOL_PREFIX = "__TOOL__::";
 let attachedImage = null;   // base64 data URL of an uploaded image
 let composerMode = "chat";  // "chat" | "image" | "ppt"
+let isGuest = false;        // true when using the app without an account
 const newChatBtn = document.getElementById("new-chat-btn");
 const addChatBtn = document.getElementById("add-chat-btn");
 const toggleSidebar = document.getElementById("toggle-sidebar");
@@ -35,6 +36,7 @@ const micBtn = document.getElementById("mic-btn");
 
 /* ---------- Auth ---------- */
 const authScreen = document.getElementById("auth-screen");
+const authClose = document.getElementById("auth-close");
 const authLoading = document.getElementById("auth-loading");
 const authForm = document.getElementById("auth-form");
 const authTitle = document.getElementById("auth-title");
@@ -1104,16 +1106,34 @@ function friendlyAuthError(err, fallback) {
 }
 
 function showAccount(u) {
-  if (!u) return;
-  if (logoutUser) logoutUser.textContent = u.name || "Account";
-  if (accountName) accountName.textContent = u.name || "User";
-  if (accountEmail) accountEmail.textContent = u.email || "";
   if (accountArea) accountArea.hidden = false;
+  isGuest = false;
+  refreshAccountUI();
+}
+
+function refreshAccountUI() {
+  const u = getAuthedUser();
+  if (accountArea) accountArea.hidden = false;
+  if (!isGuest && u) {
+    if (accountName) accountName.textContent = u.name || "User";
+    if (accountEmail) accountEmail.textContent = u.email || "";
+    if (logoutUser) logoutUser.textContent = "Log out";
+    if (logoutBtn) logoutBtn.title = "Log out";
+  } else {
+    if (accountName) accountName.textContent = "Guest";
+    if (accountEmail) accountEmail.textContent = "Sign in to save chats";
+    if (logoutUser) logoutUser.textContent = "Sign in";
+    if (logoutBtn) logoutBtn.title = "Sign in to save your chats";
+  }
 }
 
 authSwitchBtn.addEventListener("click", () => {
   setAuthMode(authMode === "login" ? "signup" : "login");
 });
+
+if (authClose) {
+  authClose.addEventListener("click", () => showAuthScreen(false));
+}
 
 authGoogle.addEventListener("click", async () => {
   authError.textContent = "";
@@ -1207,17 +1227,22 @@ authForm.addEventListener("submit", async (e) => {
 });
 
 logoutBtn.addEventListener("click", () => {
+  if (isGuest) {
+    showAuthScreen(true);
+    setAuthMode("login");
+    return;
+  }
   clearAuth();
   chats = [];
   activeId = null;
   save();
   renderChatList();
   renderConversation();
-  if (accountArea) accountArea.hidden = true;
-  if (logoutUser) logoutUser.textContent = "Sign in";
-  showAuthScreen(true);
+  isGuest = true;
+  refreshAccountUI();
+  showAuthScreen(false);
   setAuthMode("login");
-  toast("Logged out");
+  toast("Logged out — continuing as a guest");
 });
 
 function afterLogin() {
@@ -1297,10 +1322,16 @@ async function init() {
     catch { clearAuth(); }
   }
 
-  // Not authenticated -> STATE A: login only.
+  // Not authenticated -> enter as a GUEST (no login required).
+  enterGuest();
+}
+
+function enterGuest() {
+  isGuest = true;
   showLoading(false);
-  showAuthScreen(true);
-  setAuthMode("login");
+  refreshAccountUI();
+  showAuthScreen(false);
+  toast("You're using Spike as a guest — sign in anytime to save your chats.");
 }
 
 async function refreshAuthConfig() {
