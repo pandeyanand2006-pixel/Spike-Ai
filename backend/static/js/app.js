@@ -20,9 +20,6 @@ const popAttach = document.getElementById("pop-attach");
 const popImage = document.getElementById("pop-image");
 const popPpt = document.getElementById("pop-ppt");
 const imgInput = document.getElementById("img-input");
-const attachPreview = document.getElementById("attach-preview");
-const attachThumb = document.getElementById("attach-thumb");
-const attachRemove = document.getElementById("attach-remove");
 const TOOL_PREFIX = "__TOOL__::";
 let attachedImage = null;   // base64 data URL of an uploaded image
 let composerMode = "chat";  // "chat" | "image" | "ppt"
@@ -52,6 +49,7 @@ const authPassword = document.getElementById("auth-password");
 const authConfirmField = document.getElementById("auth-confirm-field");
 const authConfirm = document.getElementById("auth-confirm");
 const authGoogle = document.getElementById("auth-google");
+const authDivider = document.querySelector(".auth-divider");
 const authForgot = document.getElementById("auth-forgot");
 const accountArea = document.getElementById("account-area");
 const accountName = document.getElementById("account-name");
@@ -916,8 +914,6 @@ function updateSendState() {
 function clearComposerState() {
   attachedImage = null;
   composerMode = "chat";
-  attachPreview.hidden = true;
-  attachThumb.removeAttribute("src");
   plusBtn.classList.remove("active");
   closePopover();
 }
@@ -949,7 +945,13 @@ document.addEventListener("click", (e) => {
 
 popAttach.addEventListener("click", () => {
   closePopover();
-  imgInput.click();
+  if (attachedImage) {
+    // toggle off: clear the attached image
+    attachedImage = null;
+    setMode("chat");
+  } else {
+    imgInput.click();
+  }
 });
 popImage.addEventListener("click", () => {
   closePopover();
@@ -966,17 +968,10 @@ imgInput.addEventListener("change", () => {
   const reader = new FileReader();
   reader.onload = () => {
     attachedImage = reader.result;
-    attachThumb.src = attachedImage;
-    attachPreview.hidden = false;
     setMode("chat"); // attached image = vision chat (not generation)
   };
   reader.readAsDataURL(file);
   imgInput.value = "";
-});
-attachRemove.addEventListener("click", () => {
-  attachedImage = null;
-  attachPreview.hidden = true;
-  attachThumb.removeAttribute("src");
 });
 
 newChatBtn.addEventListener("click", newChat);
@@ -1184,6 +1179,7 @@ async function init() {
   renderConversation();
   checkHealth();
   setInterval(checkHealth, 30000);
+  refreshAuthConfig();
 
   // Start in loading state: hide both chat and auth behind opaque overlay.
   showLoading(true);
@@ -1205,5 +1201,15 @@ async function init() {
   showLoading(false);
   showAuthScreen(true);
   setAuthMode("login");
+}
+
+async function refreshAuthConfig() {
+  try {
+    const res = await fetch("/api/auth/status");
+    const data = await res.json().catch(() => ({}));
+    const showGoogle = !!(data && data.google);
+    if (authGoogle) authGoogle.style.display = showGoogle ? "" : "none";
+    if (authDivider) authDivider.style.display = showGoogle ? "" : "none";
+  } catch (e) { /* leave defaults */ }
 }
 init();
