@@ -26,6 +26,10 @@
       <nav class="chat-list" id="chat-list"></nav>
       <div class="sidebar-footer">
         <span class="status" id="status">Connecting…</span>
+        <button class="logout-btn" id="logout-btn" title="Log out">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M16 13v-2H7V8l-5 4 5 4v-3zM20 7v10H9v2h11a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1H9v2z"/></svg>
+          <span class="logout-user" id="logout-user">Log out</span>
+        </button>
       </div>
     </aside>
 
@@ -100,6 +104,37 @@
   </div>
 
   <div class="toast" id="toast"></div>
+
+  <!-- ============ Auth screen ============ -->
+  <div class="auth-screen" id="auth-screen">
+    <div class="auth-card">
+      <img src="/static/logo.svg" alt="logo" class="auth-logo" />
+      <h2 id="auth-title">Welcome to Spike</h2>
+      <p class="auth-sub" id="auth-sub">Sign in to continue</p>
+
+      <form id="auth-form" autocomplete="on">
+        <div class="auth-field" id="auth-name-field">
+          <input type="text" id="auth-name" placeholder="Full name" autocomplete="name" />
+        </div>
+        <div class="auth-field">
+          <input type="email" id="auth-email" placeholder="Email" autocomplete="email" required />
+        </div>
+        <div class="auth-field">
+          <input type="password" id="auth-password" placeholder="Password" autocomplete="current-password" required />
+        </div>
+        <div class="auth-field" id="auth-confirm-field">
+          <input type="password" id="auth-confirm" placeholder="Confirm password" autocomplete="new-password" />
+        </div>
+        <button type="submit" class="auth-submit" id="auth-submit">Continue</button>
+      </form>
+
+      <p class="auth-switch">
+        <span id="auth-switch-text">Don't have an account?</span>
+        <button type="button" id="auth-switch-btn" class="auth-link">Sign up</button>
+      </p>
+      <p class="auth-error" id="auth-error"></p>
+    </div>
+  </div>
 
   <script src="/static/js/marked.min.js"></script>
   <script src="/static/js/app.js"></script>

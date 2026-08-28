@@ -21,6 +21,62 @@ const toastEl = document.getElementById("toast");
 const scrollFab = document.getElementById("scroll-fab");
 const micBtn = document.getElementById("mic-btn");
 
+/* ---------- Auth ---------- */
+const authScreen = document.getElementById("auth-screen");
+const authForm = document.getElementById("auth-form");
+const authTitle = document.getElementById("auth-title");
+const authSub = document.getElementById("auth-sub");
+const authSubmit = document.getElementById("auth-submit");
+const authError = document.getElementById("auth-error");
+const authSwitchText = document.getElementById("auth-switch-text");
+const authSwitchBtn = document.getElementById("auth-switch-btn");
+const authNameField = document.getElementById("auth-name-field");
+const authName = document.getElementById("auth-name");
+const authEmail = document.getElementById("auth-email");
+const authPassword = document.getElementById("auth-password");
+const authConfirmField = document.getElementById("auth-confirm-field");
+const authConfirm = document.getElementById("auth-confirm");
+
+const TOKEN_KEY = "spike_token";
+const USER_KEY = "spike_user";
+let authMode = "login";
+
+function getToken() { return localStorage.getItem(TOKEN_KEY); }
+function getAuthedUser() {
+  try { return JSON.parse(localStorage.getItem(USER_KEY) || "null"); }
+  catch { return null; }
+}
+function setAuth(token, user) {
+  localStorage.setItem(TOKEN_KEY, token);
+  localStorage.setItem(USER_KEY, JSON.stringify(user));
+}
+function clearAuth() {
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(USER_KEY);
+}
+function authHeaders(extra) {
+  const t = getToken();
+  return Object.assign({ "Content-Type": "application/json" }, extra || {},
+    t ? { "Authorization": "Bearer " + t } : {});
+}
+function showAuthScreen(show) {
+  if (show) { authScreen.classList.remove("hidden"); }
+  else { authScreen.classList.add("hidden"); }
+}
+function setAuthMode(mode) {
+  authMode = mode;
+  const signup = mode === "signup";
+  authTitle.textContent = signup ? "Create your account" : "Welcome back";
+  authSub.textContent = signup ? "Sign up to get started" : "Sign in to continue";
+  authSubmit.textContent = signup ? "Create account" : "Continue";
+  authSwitchText.textContent = signup ? "Already have an account?" : "Don't have an account?";
+  authSwitchBtn.textContent = signup ? "Sign in" : "Sign up";
+  authNameField.classList.toggle("hidden", !signup);
+  authConfirmField.classList.toggle("hidden", !signup);
+  authError.textContent = "";
+}
+
+
 /* ---------- State ---------- */
 let chats = JSON.parse(localStorage.getItem("chats") || "[]");
 let activeId = localStorage.getItem("activeChat") || null;
@@ -327,14 +383,26 @@ function send(textOverride) {
     try {
       const res = await fetch("/api/chat/stream", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: history, model: currentModel() }),
+        headers: authHeaders(),
+        body: JSON.stringify({
+          messages: history,
+          model: currentModel(),
+          conversationId: chat.backendId || null,
+        }),
         signal: activeController.signal,
       });
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || "Request failed");
+      }
+
+      const cid = res.headers.get("X-Conversation-Id");
+      if (cid) {
+        chat.backendId = cid;
+        if (chat.title && chat.title !== "New chat") { /* keep */ }
+        else { chat.id = "backend-" + cid; activeId = chat.id; }
+        save();
       }
 
       removeTyping();
@@ -688,8 +756,114 @@ document.querySelector(".suggestions").addEventListener("click", (e) => {
   if (t) send(t.textContent);
 });
 
+/* ---------- Auth handlers ---------- */
+const logoutBtn = document.getElementById("logout-btn");
+const logoutUser = document.getElementById("logout-user");
+
+authSwitchBtn.addEventListener("click", () => {
+  setAuthMode(authMode === "login" ? "signup" : "login");
+});
+
+authForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  authError.textContent = "";
+  const email = authEmail.value.trim();
+  const password = authPassword.value;
+  if (!email || !password) { authError.textContent = "Please fill in all fields."; return; }
+  if (authMode === "signup") {
+    const name = authName.value.trim();
+    if (!name) { authError.textContent = "Please enter your name."; return; }
+    if (password.length < 8) { authError.textContent = "Password must be at least 8 characters."; return; }
+    if (password !== authConfirm.value) { authError.textContent = "Passwords do not match."; return; }
+    authSubmit.disabled = true;
+    authSubmit.textContent = "Creating…";
+    try {
+      const res = await fetch("/api/auth/register", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, email, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Registration failed");
+      setAuth(data.access_token, data.user);
+      afterLogin();
+    } catch (err) {
+      authError.textContent = err.message;
+    } finally {
+      authSubmit.disabled = false;
+      authSubmit.textContent = "Create account";
+    }
+  } else {
+    authSubmit.disabled = true;
+    authSubmit.textContent = "Signing in…";
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Login failed");
+      setAuth(data.access_token, data.user);
+      afterLogin();
+    } catch (err) {
+      authError.textContent = err.message;
+    } finally {
+      authSubmit.disabled = false;
+      authSubmit.textContent = "Continue";
+    }
+  }
+});
+
+logoutBtn.addEventListener("click", () => {
+  clearAuth();
+  chats = [];
+  activeId = null;
+  save();
+  renderChatList();
+  renderConversation();
+  showAuthScreen(true);
+  setAuthMode("login");
+});
+
+function afterLogin() {
+  const u = getAuthedUser();
+  if (u && logoutUser) logoutUser.textContent = u.name || "Log out";
+  showAuthScreen(false);
+  loadBackendConversations();
+  toast("Welcome, " + (u ? u.name : "back") + "!");
+}
+
+function loadBackendConversations() {
+  const t = getToken();
+  if (!t) return;
+  fetch("/api/conversations", { headers: authHeaders() })
+    .then((r) => r.json())
+    .then((list) => {
+      if (Array.isArray(list)) {
+        chats = list.map((c) => ({
+          id: "backend-" + c.id,
+          backendId: c.id,
+          title: c.title || "New chat",
+          messages: [],
+        }));
+        activeId = chats.length ? chats[0].id : null;
+        save(); renderChatList(); renderConversation();
+      }
+    })
+    .catch(() => {});
+}
+
 /* ---------- Init ---------- */
 applyTheme(localStorage.getItem(THEME_KEY) || "auto");
 renderConversation();
 checkHealth();
 setInterval(checkHealth, 30000);
+
+if (getToken()) {
+  const u = getAuthedUser();
+  if (u && logoutUser) logoutUser.textContent = u.name || "Log out";
+  showAuthScreen(false);
+  loadBackendConversations();
+} else {
+  showAuthScreen(true);
+  setAuthMode("login");
+}
