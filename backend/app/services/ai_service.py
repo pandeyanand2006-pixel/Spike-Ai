@@ -159,8 +159,8 @@ def detect_tool(text: str) -> Optional[str]:
     ):
         return "image"
     if re.search(
-        r"\b(make|create|build|generate|prepare|give me)\b.{0,25}"
-        r"\b(ppt|presentation|slides?|powerpoint|deck)\b",
+        r"\b(make|create|build|generate|prepare|give me|write|draft)\b.{0,30}"
+        r"\b(ppt|presentation|slides?|powerpoint|deck|pdf|document|report|essay|article|whitepaper)\b",
         t,
     ):
         return "ppt"

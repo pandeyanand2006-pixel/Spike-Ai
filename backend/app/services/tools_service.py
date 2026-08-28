@@ -30,7 +30,8 @@ async def _generate_image_openai(prompt: str, api_key: str) -> bytes:
         "Content-Type": "application/json",
     }
     # Try the common models in order; first that works wins.
-    for model in ("dall-e-3", "gpt-image-1"):
+    last_err = "no models attempted"
+    for model in ("dall-e-3", "gpt-image-1", "dall-e-2"):
         try:
             async with httpx.AsyncClient(timeout=120) as client:
                 resp = await client.post(
@@ -45,12 +46,14 @@ async def _generate_image_openai(prompt: str, api_key: str) -> bytes:
                     },
                 )
                 if resp.status_code != 200:
+                    last_err = f"{model} -> HTTP {resp.status_code}: {resp.text[:200]}"
                     continue
                 b64 = resp.json()["data"][0]["b64_json"]
                 return base64.b64decode(b64)
-        except Exception:
+        except Exception as e:
+            last_err = f"{model} -> {e}"
             continue
-    raise RuntimeError("OpenAI image model unavailable (dall-e-3 / gpt-image-1)")
+    raise RuntimeError(last_err)
 
 
 async def generate_image(prompt: str) -> str:
