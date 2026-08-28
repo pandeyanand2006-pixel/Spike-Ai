@@ -20,10 +20,16 @@ class AIService:
     def build_history(self, messages: List[dict], system_prompt: str) -> List[dict]:
         history = [{"role": "system", "content": system_prompt}]
         for m in messages:
-            role = "assistant" if m.get("role") == "bot" else m.get("role")
+            # Accept both Pydantic Message objects and plain dicts
+            if isinstance(m, dict):
+                role = "assistant" if m.get("role") == "bot" else m.get("role")
+                content = m.get("content", "")
+            else:
+                role = "assistant" if getattr(m, "role", "") == "bot" else getattr(m, "role", "")
+                content = getattr(m, "content", "") or ""
             if role not in ("user", "assistant"):
                 continue
-            history.append({"role": role, "content": m.get("content", "")})
+            history.append({"role": role, "content": content})
         return history
 
     async def complete(
