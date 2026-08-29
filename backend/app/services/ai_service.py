@@ -73,7 +73,7 @@ class AIService:
                 model=model or self.default_model,
                 messages=self.build_history(messages, system_prompt or get_settings().system_prompt),
                 temperature=temperature,
-                max_tokens=4000,
+                max_tokens=1500,
                 stream=True,
             )
             async for chunk in stream:

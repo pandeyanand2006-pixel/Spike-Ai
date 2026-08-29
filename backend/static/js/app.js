@@ -370,7 +370,7 @@ function showTyping() {
     `<div class="msg-body"><div class="role-label">Spike</div>` +
     `<div class="typing-box"><div class="typing-dots"><span></span><span></span><span></span></div>` +
     `<span class="typing-label">Thinking…</span></div>` +
-    `<button class="stop-btn" id="stop-btn" title="Stop generating"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button></div>`;
+    `<button class="stop-btn" id="stop-btn" title="Tap to stop"><span class="stop-dots"><i></i><i></i><i></i></span><span class="stop-text">Stop</span></button></div>`;
   msgContainer.appendChild(wrap);
   scrollBottom();
   let i = 0;
@@ -704,7 +704,7 @@ function send(textOverride) {
           save();
           updateChatTitle(chat, full);
           if (voiceMode) {
-            if (speechBuffer.trim()) enqueueSpeech(speechBuffer);
+            if (speechBuffer.trim()) speakText(speechBuffer);
             speechBuffer = "";
           }
         }
@@ -788,6 +788,9 @@ let ttsPlaying = false;
 let speechQueue = [];
 let speakingNow = false;
 let speechBuffer = "";
+let voiceSpeakTimer = null;
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 function pickFemaleVoice() {
   if (!cachedVoices.length && window.speechSynthesis) cachedVoices = window.speechSynthesis.getVoices() || [];
   if (!cachedVoices.length) return null;
@@ -799,10 +802,18 @@ function pickFemaleVoice() {
   return en || cachedVoices[0];
 }
 function clearSpeech() {
+  if (voiceSpeakTimer) { clearTimeout(voiceSpeakTimer); voiceSpeakTimer = null; }
   if (window.speechSynthesis) window.speechSynthesis.cancel();
   speechQueue = []; speechBuffer = ""; speakingNow = false; ttsPlaying = false;
 }
-/* Streaming TTS: speak sentence-by-sentence as text arrives (real-time feel) */
+/* iOS can't reliably queue multiple utterances, so speak the whole reply at once.
+   Other browsers stream sentence-by-sentence for a real-time, Gemini-Live feel. */
+function speakText(text) {
+  const t = (text || "").replace(/[#*`_>\[\]]/g, " ").trim();
+  if (!t) return;
+  if (isIOS) speakOnce(t);
+  else enqueueSpeech(t);
+}
 function enqueueSpeech(text) {
   const t = (text || "").replace(/^[#*`_>\[\]\-]+/, "").replace(/[#*`_>\[\]]/g, " ").trim();
   if (!t) return;
@@ -815,17 +826,34 @@ function pumpSpeech() {
   speakingNow = true; ttsPlaying = true;
   if (voiceMode) { setOrbState("speaking"); armBargeIn(); }
   const text = speechQueue.shift();
+  speakUtterance(text, () => {
+    speakingNow = false;
+    if (speechQueue.length) { if (voiceMode) armBargeIn(); pumpSpeech(); }
+    else { ttsPlaying = false; if (voiceMode) resumeListening(); }
+  });
+}
+function speakOnce(text) {
+  if (!window.speechSynthesis) { if (voiceMode) resumeListening(); return; }
+  ttsPlaying = true;
+  if (voiceMode) setOrbState("speaking");
+  speakUtterance(text, () => { ttsPlaying = false; if (voiceMode) resumeListening(); });
+}
+function speakUtterance(text, onDone) {
+  if (voiceSpeakTimer) { clearTimeout(voiceSpeakTimer); voiceSpeakTimer = null; }
   const u = new SpeechSynthesisUtterance(text);
   u.rate = 1.05; u.pitch = 1.05;
   const v = pickFemaleVoice();
   if (v) u.voice = v;
-  u.onend = () => {
-    speakingNow = false;
-    if (speechQueue.length) { if (voiceMode) armBargeIn(); pumpSpeech(); }
-    else { ttsPlaying = false; if (voiceMode) resumeListening(); }
-  };
-  u.onerror = () => { speakingNow = false; ttsPlaying = false; speechQueue = []; };
-  window.speechSynthesis.speak(u);
+  u.onend = () => { if (voiceSpeakTimer) { clearTimeout(voiceSpeakTimer); voiceSpeakTimer = null; } if (onDone) onDone(); };
+  u.onerror = () => { if (voiceSpeakTimer) { clearTimeout(voiceSpeakTimer); voiceSpeakTimer = null; } speakingNow = false; ttsPlaying = false; speechQueue = []; };
+  try { window.speechSynthesis.speak(u); } catch (e) {}
+  /* Safety net: some mobile browsers don't fire onend reliably, so force-advance. */
+  const dur = Math.max(2000, text.length * 70);
+  voiceSpeakTimer = setTimeout(() => {
+    voiceSpeakTimer = null;
+    try { window.speechSynthesis.cancel(); } catch (e) {}
+    if (onDone) onDone();
+  }, dur);
 }
 function feedSpeech(chunk) {
   speechBuffer += chunk || "";
@@ -838,7 +866,6 @@ function feedSpeech(chunk) {
     part.split(/[.!?\n]/).forEach((s) => { const t = s.replace(/[#*`_>\[\]]/g, " ").trim(); if (t) enqueueSpeech(t); });
   }
 }
-function speakText(text) { enqueueSpeech(text); }
 
 document.addEventListener("click", (e) => {
   const btn = e.target.closest(".copy-btn");
@@ -1133,14 +1160,22 @@ async function openVoiceMode() {
   stopViz(); startSpeakViz();
   setOrbState("speaking");
   speakText("Hey, I'm Spike. How can I help you?");
+  // Create + resume the AudioContext INSIDE the tap gesture (iOS keeps it suspended otherwise,
+  // which would make the amplitude analyser read silence and break cloud STT).
+  try {
+    voiceAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (voiceAudioCtx.state === "suspended") await voiceAudioCtx.resume();
+  } catch (e) { voiceAudioCtx = null; }
   // best-effort mic stream for the amplitude visualizer (and cloud STT)
   try {
     voiceMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    voiceAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const src = voiceAudioCtx.createMediaStreamSource(voiceMicStream);
-    voiceAnalyser = voiceAudioCtx.createAnalyser();
-    voiceAnalyser.fftSize = 256;
-    src.connect(voiceAnalyser);
+    if (voiceAudioCtx) {
+      const src = voiceAudioCtx.createMediaStreamSource(voiceMicStream);
+      voiceAnalyser = voiceAudioCtx.createAnalyser();
+      voiceAnalyser.fftSize = 256;
+      src.connect(voiceAnalyser);
+      if (voiceAudioCtx.state === "suspended") voiceAudioCtx.resume();
+    }
   } catch (e) { voiceMicStream = null; voiceAnalyser = null; }
   startMicViz();
   // Begin listening once the mic is ready (greeting may still be speaking)
@@ -1180,6 +1215,7 @@ function resumeListening() {
 function startCloudListening() {
   if (!voiceMode || !voiceMicStream || cloudListenActive) return;
   if (typeof MediaRecorder === "undefined") { toast("Recording not supported on this device"); return; }
+  if (voiceAudioCtx && voiceAudioCtx.state === "suspended") voiceAudioCtx.resume();
   cloudListenActive = true;
   cloudChunks = [];
   try { cloudRecorder = new MediaRecorder(voiceMicStream); }
@@ -1191,7 +1227,25 @@ function startCloudListening() {
   try { cloudRecorder.start(250); } catch (e) { cloudListenActive = false; return; }
   setOrbState("listening");
   stopViz(); startMicViz();
-  startCloudWatch();
+  if (voiceAnalyser) startCloudWatch();
+  else startCloudTimedCapture(); // fallback if amplitude analyser unavailable
+}
+/* If we can't read mic amplitude (e.g. audio context suspended), record a fixed window. */
+function startCloudTimedCapture() {
+  const dur = 4500;
+  let elapsed = 0;
+  const id = setInterval(() => {
+    elapsed += 250;
+    if (!cloudListenActive) { clearInterval(id); return; }
+    if (elapsed >= dur) {
+      clearInterval(id);
+      const chunks = cloudChunks; cloudChunks = [];
+      if (cloudRecorder && cloudRecorder.state !== "inactive") { try { cloudRecorder.stop(); } catch (e) {} }
+      const blob = new Blob(chunks, { type: (cloudRecorder && cloudRecorder.mimeType) || "audio/webm" });
+      if (blob.size > 800) processCloudAudio(blob);
+      else startCloudListening();
+    }
+  }, 250);
 }
 function stopCloudListening() {
   cloudListenActive = false;
