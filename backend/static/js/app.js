@@ -33,6 +33,8 @@ const chatTitle = document.getElementById("chat-title");
 const toastEl = document.getElementById("toast");
 const scrollFab = document.getElementById("scroll-fab");
 const micBtn = document.getElementById("mic-btn");
+const voiceAssistBtn = document.getElementById("voice-assist-btn");
+let voiceAssist = localStorage.getItem("voiceAssist") === "1";
 
 /* ---------- Auth ---------- */
 const authScreen = document.getElementById("auth-screen");
@@ -695,6 +697,7 @@ function send(textOverride) {
           addActions(shell, full);
           save();
           updateChatTitle(chat, full);
+          if (voiceAssist) speakText(full);
         }
       }
       scrollBottom();
@@ -975,6 +978,19 @@ if (recognition) {
   });
 } else {
   micBtn.style.display = "none";
+}
+
+/* ---------- Voice assistant (read replies aloud) ---------- */
+if (voiceAssistBtn) {
+  if (voiceAssist) voiceAssistBtn.classList.add("active");
+  voiceAssistBtn.addEventListener("click", () => {
+    if (!window.speechSynthesis) { toast("Voice playback not supported"); return; }
+    voiceAssist = !voiceAssist;
+    voiceAssistBtn.classList.toggle("active", voiceAssist);
+    localStorage.setItem("voiceAssist", voiceAssist ? "1" : "0");
+    toast(voiceAssist ? "Voice assistant on — replies will be read aloud" : "Voice assistant off");
+    if (!voiceAssist) window.speechSynthesis.cancel();
+  });
 }
 
 /* ---------- Events ---------- */
