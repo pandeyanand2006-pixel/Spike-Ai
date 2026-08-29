@@ -1099,6 +1099,10 @@ let voiceMode = false;   // true while the voice orb is open
 let voiceBusy = false;   // true while Spike is thinking/speaking
 
 const hasWebSpeech = !!SpeechRec;  // false on iOS Safari -> use cloud STT
+const isTouch = ("ontouchstart" in window) || (navigator.maxTouchPoints > 0);
+// On touch devices using Web Speech, the mic is exclusive: don't grab it for the
+// visualizer (that would block the recognizer). Desktop and cloud-STT devices are fine.
+const micForViz = !hasWebSpeech || !isTouch;
 let cloudRecorder = null, cloudChunks = [], cloudListenActive = false, cloudWatchRaf = null, cloudSilentSince = 0;
 
 function setOrbState(state) {
@@ -1166,17 +1170,20 @@ async function openVoiceMode() {
     voiceAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
     if (voiceAudioCtx.state === "suspended") await voiceAudioCtx.resume();
   } catch (e) { voiceAudioCtx = null; }
-  // best-effort mic stream for the amplitude visualizer (and cloud STT)
-  try {
-    voiceMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    if (voiceAudioCtx) {
-      const src = voiceAudioCtx.createMediaStreamSource(voiceMicStream);
-      voiceAnalyser = voiceAudioCtx.createAnalyser();
-      voiceAnalyser.fftSize = 256;
-      src.connect(voiceAnalyser);
-      if (voiceAudioCtx.state === "suspended") voiceAudioCtx.resume();
-    }
-  } catch (e) { voiceMicStream = null; voiceAnalyser = null; }
+  // Grab the mic ONLY when needed for the visualizer/cloud STT. On touch devices that
+  // use Web Speech, capturing the mic here would block the recognizer, so we skip it.
+  if (micForViz) {
+    try {
+      voiceMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (voiceAudioCtx) {
+        const src = voiceAudioCtx.createMediaStreamSource(voiceMicStream);
+        voiceAnalyser = voiceAudioCtx.createAnalyser();
+        voiceAnalyser.fftSize = 256;
+        src.connect(voiceAnalyser);
+        if (voiceAudioCtx.state === "suspended") voiceAudioCtx.resume();
+      }
+    } catch (e) { voiceMicStream = null; voiceAnalyser = null; }
+  }
   startMicViz();
   // Begin listening once the mic is ready (greeting may still be speaking)
   if (voiceMode && !ttsPlaying && !hasWebSpeech) startVoiceListening();
