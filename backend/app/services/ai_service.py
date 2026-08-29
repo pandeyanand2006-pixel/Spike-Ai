@@ -122,7 +122,32 @@ class AIService:
                 ),
             )
 
-    async def outline_presentation(self, topic: str, slides: int = 6) -> List[dict]:
+    async def transcribe(self, audio_bytes: bytes, content_type: str = "audio/webm") -> str:
+        """Transcribe audio via Groq Whisper (used as a fallback when the browser
+        Web Speech API is unavailable, e.g. iOS Safari)."""
+        if not self._api_key_present:
+            return ""
+        ct = (content_type or "").lower()
+        if "mp4" in ct or "m4a" in ct:
+            fname = "audio.mp4"
+        elif "ogg" in ct:
+            fname = "audio.ogg"
+        elif "wav" in ct:
+            fname = "audio.wav"
+        else:
+            fname = "audio.webm"
+        last_err = ""
+        for model in ("whisper-large-v3-turbo", "whisper-large-v3"):
+            try:
+                resp = await self.client.audio.transcriptions.create(
+                    model=model,
+                    file=(fname, audio_bytes, content_type or "audio/webm"),
+                    language="en",
+                )
+                return getattr(resp, "text", "") or ""
+            except Exception as e:  # try next model
+                last_err = str(e)
+        return ""
         """Use the LLM to produce a structured presentation outline as JSON."""
         sys = (
             "You are a presentation designer. Given a topic, return ONLY valid JSON: "

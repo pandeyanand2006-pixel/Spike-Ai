@@ -1071,6 +1071,9 @@ const voiceOrbBackdrop = document.getElementById("voice-orb-backdrop");
 let voiceMode = false;   // true while the voice orb is open
 let voiceBusy = false;   // true while Spike is thinking/speaking
 
+const hasWebSpeech = !!SpeechRec;  // false on iOS Safari -> use cloud STT
+let cloudRecorder = null, cloudChunks = [], cloudListenActive = false, cloudWatchRaf = null, cloudSilentSince = 0;
+
 function setOrbState(state) {
   if (!voiceOrbCircle) return;
   voiceOrbCircle.classList.remove("listening", "thinking", "speaking");
@@ -1120,12 +1123,17 @@ function stopViz() {
 }
 
 async function openVoiceMode() {
-  if (!SpeechRec) { toast("Voice input not supported on this browser"); return; }
+  if (!window.speechSynthesis && !hasWebSpeech && typeof MediaRecorder === "undefined") {
+    toast("Voice not supported on this browser"); return;
+  }
   voiceMode = true;
   if (voiceAssistBtn) voiceAssistBtn.classList.add("active");
   if (voiceOrb) voiceOrb.hidden = false;
-  setOrbState("listening");
-  // best-effort mic stream for the amplitude visualizer
+  // Speak the greeting while we still have the user-gesture context (iOS needs this)
+  stopViz(); startSpeakViz();
+  setOrbState("speaking");
+  speakText("Hey, I'm Spike. How can I help you?");
+  // best-effort mic stream for the amplitude visualizer (and cloud STT)
   try {
     voiceMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     voiceAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -1135,10 +1143,8 @@ async function openVoiceMode() {
     src.connect(voiceAnalyser);
   } catch (e) { voiceMicStream = null; voiceAnalyser = null; }
   startMicViz();
-  // Greet the user (female voice) then start listening
-  stopViz(); startSpeakViz();
-  setOrbState("speaking");
-  speakText("Hey, I'm Spike. How can I help you?");
+  // Begin listening once the mic is ready (greeting may still be speaking)
+  if (voiceMode && !ttsPlaying && !hasWebSpeech) startVoiceListening();
 }
 function closeVoiceMode() {
   voiceMode = false;
@@ -1147,10 +1153,16 @@ function closeVoiceMode() {
   if (voiceOrb) voiceOrb.hidden = true;
   stopViz();
   if (recognition) { try { recognition.stop(); } catch (e) {} }
+  stopCloudListening();
   clearSpeech();
   if (voiceMicStream) voiceMicStream.getTracks().forEach((t) => t.stop());
   if (voiceAudioCtx) { try { voiceAudioCtx.close(); } catch (e) {} }
   voiceMicStream = null; voiceAudioCtx = null; voiceAnalyser = null;
+}
+/* Unified entry point: Web Speech on Android/desktop, cloud STT on iOS */
+function startVoiceListening() {
+  if (hasWebSpeech) startListening();
+  else startCloudListening();
 }
 function startListening() {
   if (!voiceMode || !recognition || busy) return;
@@ -1161,11 +1173,88 @@ function startListening() {
 function resumeListening() {
   if (!voiceMode) return;
   voiceBusy = false;
-  startListening();
+  startVoiceListening();
 }
-/* Keep recognition armed while Spike is speaking so the user can interrupt */
+
+/* ---- Cloud STT fallback (iOS Safari etc.) ---- */
+function startCloudListening() {
+  if (!voiceMode || !voiceMicStream || cloudListenActive) return;
+  if (typeof MediaRecorder === "undefined") { toast("Recording not supported on this device"); return; }
+  cloudListenActive = true;
+  cloudChunks = [];
+  try { cloudRecorder = new MediaRecorder(voiceMicStream); }
+  catch (e) { cloudListenActive = false; toast("Recording not supported on this device"); return; }
+  cloudRecorder.ondataavailable = (e) => {
+    if (e.data && e.data.size && !ttsPlaying && !speakingNow) cloudChunks.push(e.data);
+  };
+  cloudRecorder.onstop = () => { cloudListenActive = false; };
+  try { cloudRecorder.start(250); } catch (e) { cloudListenActive = false; return; }
+  setOrbState("listening");
+  stopViz(); startMicViz();
+  startCloudWatch();
+}
+function stopCloudListening() {
+  cloudListenActive = false;
+  if (cloudWatchRaf) cancelAnimationFrame(cloudWatchRaf);
+  cloudWatchRaf = null;
+  if (cloudRecorder && cloudRecorder.state !== "inactive") { try { cloudRecorder.stop(); } catch (e) {} }
+  cloudRecorder = null;
+}
+function startCloudWatch() {
+  if (!voiceAnalyser) return;
+  const data = new Uint8Array(voiceAnalyser.frequencyBinCount);
+  cloudSilentSince = 0;
+  const tick = () => {
+    if (!cloudListenActive) return;
+    voiceAnalyser.getByteTimeDomainData(data);
+    let sum = 0;
+    for (let i = 0; i < data.length; i++) { const v = (data[i] - 128) / 128; sum += v * v; }
+    const rms = Math.sqrt(sum / data.length);
+    const now = Date.now();
+    if (ttsPlaying || speakingNow) {
+      cloudSilentSince = 0; // assistant is talking; ignore audio
+    } else if (rms < 0.02) {
+      if (cloudSilentSince === 0) cloudSilentSince = now;
+      else if (now - cloudSilentSince > 1200) {
+        const chunks = cloudChunks; cloudChunks = [];
+        cloudSilentSince = 0;
+        if (chunks.length) {
+          const blob = new Blob(chunks, { type: (cloudRecorder && cloudRecorder.mimeType) || "audio/webm" });
+          if (blob.size > 800) { processCloudAudio(blob); return; }
+        }
+      }
+    } else {
+      cloudSilentSince = 0;
+    }
+    cloudWatchRaf = requestAnimationFrame(tick);
+  };
+  tick();
+}
+async function processCloudAudio(blob) {
+  stopCloudListening(); // pause capture while we transcribe + answer
+  setOrbState("thinking");
+  stopViz(); startSpeakViz();
+  try {
+    const fd = new FormData();
+    fd.append("file", blob, "audio.webm");
+    const headers = {};
+    const tk = getToken();
+    if (tk) headers["Authorization"] = "Bearer " + tk;
+    const r = await fetch("/api/voice/transcribe", { method: "POST", body: fd, headers });
+    const j = await r.json().catch(() => ({}));
+    const text = (j.text || "").trim();
+    if (text) { voiceBusy = true; send(text); }
+    else { setOrbState("listening"); startCloudListening(); }
+  } catch (e) {
+    toast("Transcription failed");
+    setOrbState("listening");
+    startCloudListening();
+  }
+}
+
+/* Keep recognition armed while Spike is speaking so the user can interrupt (Web Speech only) */
 function armBargeIn() {
-  if (!voiceMode || !recognition || busy) return;
+  if (!voiceMode || !hasWebSpeech || busy) return;
   try { recognition.start(); } catch (e) { /* already started */ }
 }
 /* Tap the orb to stop the current reply and listen to the user immediately */
@@ -1173,7 +1262,7 @@ function bargeIn() {
   if (!voiceMode) return;
   clearSpeech();
   setOrbState("listening");
-  startListening();
+  startVoiceListening();
 }
 
 if (voiceAssistBtn) {
