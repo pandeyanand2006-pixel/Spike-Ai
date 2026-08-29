@@ -27,11 +27,29 @@ def _last_user_text(req: ChatRequest) -> str:
     return ""
 
 
+def _to_dict(m):
+    if isinstance(m, dict):
+        return {"role": m.get("role"), "content": m.get("content", "")}
+    return {"role": getattr(m, "role", "user"), "content": getattr(m, "content", "") or ""}
+
+
+def _trim_messages(messages, max_messages: int = 14, max_chars: int = 1000):
+    """Keep the recent context small enough to stay under Groq's free-tier request
+    token limit (8000 tokens/request) so long chats don't trigger a 413."""
+    msgs = [_to_dict(m) for m in messages]
+    if len(msgs) > max_messages:
+        msgs = msgs[-max_messages:]
+    for m in msgs:
+        if m["content"] and len(m["content"]) > max_chars:
+            m["content"] = m["content"][:max_chars] + " …"
+    return msgs
+
+
 @router.post("", response_model=ChatResponse)
 async def chat(req: ChatRequest, user: Optional[dict] = Depends(optional_current_user)):
     model = req.model or ai_service.default_model
     reply = await ai_service.complete(
-        req.messages, model=model, temperature=req.temperature
+        _trim_messages(req.messages), model=model, temperature=req.temperature
     )
     if user is not None:
         conv_obj = await ensure_conversation(
@@ -87,7 +105,7 @@ async def chat_stream(req: ChatRequest, user: Optional[dict] = Depends(optional_
                     yield json.dumps({"token": tok}) + "\n"
             else:
                 async for token in ai_service.stream(
-                    req.messages, model=model, temperature=req.temperature
+                    _trim_messages(req.messages), model=model, temperature=req.temperature
                 ):
                     if token:
                         full.append(token)
