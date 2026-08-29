@@ -666,6 +666,7 @@ function send(textOverride) {
             }
             if (!shell) { shell = addAssistantShell(); contentEl = shell.querySelector(".msg-content"); }
             full += data.token || "";
+            if (voiceMode) feedSpeech(data.token || "");
           }
           scheduleRender();
         }
@@ -703,9 +704,8 @@ function send(textOverride) {
           save();
           updateChatTitle(chat, full);
           if (voiceMode) {
-            setOrbState("speaking");
-            speakText(full, () => { if (voiceMode) resumeListening(); });
-            armBargeIn();
+            if (speechBuffer.trim()) enqueueSpeech(speechBuffer);
+            speechBuffer = "";
           }
         }
       }
@@ -785,6 +785,9 @@ function regenerate() {
 /* ---------- Actions delegation ---------- */
 let cachedVoices = [];
 let ttsPlaying = false;
+let speechQueue = [];
+let speakingNow = false;
+let speechBuffer = "";
 function pickFemaleVoice() {
   if (!cachedVoices.length && window.speechSynthesis) cachedVoices = window.speechSynthesis.getVoices() || [];
   if (!cachedVoices.length) return null;
@@ -795,19 +798,47 @@ function pickFemaleVoice() {
   const en = cachedVoices.find((v) => /^en(-|_)/i.test(v.lang));
   return en || cachedVoices[0];
 }
-function speakText(text, onEnd) {
-  const plain = (text || "").replace(/[#*`_>\[\]]/g, " ");
-  if (!window.speechSynthesis) { toast("Speech not supported"); if (onEnd) onEnd(); return; }
-  window.speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(plain);
-  u.rate = 1; u.pitch = 1.05;
+function clearSpeech() {
+  if (window.speechSynthesis) window.speechSynthesis.cancel();
+  speechQueue = []; speechBuffer = ""; speakingNow = false; ttsPlaying = false;
+}
+/* Streaming TTS: speak sentence-by-sentence as text arrives (real-time feel) */
+function enqueueSpeech(text) {
+  const t = (text || "").replace(/^[#*`_>\[\]\-]+/, "").replace(/[#*`_>\[\]]/g, " ").trim();
+  if (!t) return;
+  speechQueue.push(t);
+  pumpSpeech();
+}
+function pumpSpeech() {
+  if (speakingNow || !speechQueue.length) return;
+  if (!window.speechSynthesis) { speechQueue = []; ttsPlaying = false; if (voiceMode) resumeListening(); return; }
+  speakingNow = true; ttsPlaying = true;
+  if (voiceMode) { setOrbState("speaking"); armBargeIn(); }
+  const text = speechQueue.shift();
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = 1.05; u.pitch = 1.05;
   const v = pickFemaleVoice();
   if (v) u.voice = v;
-  ttsPlaying = true;
-  if (onEnd) u.onend = () => { ttsPlaying = false; onEnd(); };
-  u.onerror = () => { ttsPlaying = false; };
+  u.onend = () => {
+    speakingNow = false;
+    if (speechQueue.length) { if (voiceMode) armBargeIn(); pumpSpeech(); }
+    else { ttsPlaying = false; if (voiceMode) resumeListening(); }
+  };
+  u.onerror = () => { speakingNow = false; ttsPlaying = false; speechQueue = []; };
   window.speechSynthesis.speak(u);
 }
+function feedSpeech(chunk) {
+  speechBuffer += chunk || "";
+  const boundaries = /[.!?\n]/g;
+  let last = -1, m;
+  while ((m = boundaries.exec(speechBuffer)) !== null) last = m.index;
+  if (last >= 0) {
+    const part = speechBuffer.slice(0, last + 1);
+    speechBuffer = speechBuffer.slice(last + 1);
+    part.split(/[.!?\n]/).forEach((s) => { const t = s.replace(/[#*`_>\[\]]/g, " ").trim(); if (t) enqueueSpeech(t); });
+  }
+}
+function speakText(text) { enqueueSpeech(text); }
 
 document.addEventListener("click", (e) => {
   const btn = e.target.closest(".copy-btn");
@@ -979,8 +1010,7 @@ if (recognition) {
     if (voiceMode) {
       if (interim && voiceOrbCaption) voiceOrbCaption.textContent = interim;
       if (finalText) {
-        window.speechSynthesis.cancel(); // barge-in: stop any current reply
-        ttsPlaying = false;
+        clearSpeech(); // barge-in: stop any current reply immediately
         voiceBusy = true;
         setOrbState("thinking");
         stopViz(); startSpeakViz();
@@ -1108,8 +1138,7 @@ async function openVoiceMode() {
   // Greet the user (female voice) then start listening
   stopViz(); startSpeakViz();
   setOrbState("speaking");
-  ttsPlaying = true;
-  speakText("Hey, I'm Spike. How can I help you?", () => { if (voiceMode) startListening(); });
+  speakText("Hey, I'm Spike. How can I help you?");
 }
 function closeVoiceMode() {
   voiceMode = false;
@@ -1118,7 +1147,7 @@ function closeVoiceMode() {
   if (voiceOrb) voiceOrb.hidden = true;
   stopViz();
   if (recognition) { try { recognition.stop(); } catch (e) {} }
-  window.speechSynthesis.cancel();
+  clearSpeech();
   if (voiceMicStream) voiceMicStream.getTracks().forEach((t) => t.stop());
   if (voiceAudioCtx) { try { voiceAudioCtx.close(); } catch (e) {} }
   voiceMicStream = null; voiceAudioCtx = null; voiceAnalyser = null;
@@ -1142,8 +1171,7 @@ function armBargeIn() {
 /* Tap the orb to stop the current reply and listen to the user immediately */
 function bargeIn() {
   if (!voiceMode) return;
-  window.speechSynthesis.cancel();
-  ttsPlaying = false;
+  clearSpeech();
   setOrbState("listening");
   startListening();
 }
