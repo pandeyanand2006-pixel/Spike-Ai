@@ -660,7 +660,6 @@ function send(textOverride) {
                 voiceBusy = false;
                 setOrbState("speaking");
                 speakText("Here's what you asked for.", () => { if (voiceMode) resumeListening(); });
-                armBargeIn();
               }
               continue;
             }
@@ -824,11 +823,11 @@ function pumpSpeech() {
   if (speakingNow || !speechQueue.length) return;
   if (!window.speechSynthesis) { speechQueue = []; ttsPlaying = false; if (voiceMode) resumeListening(); return; }
   speakingNow = true; ttsPlaying = true;
-  if (voiceMode) { setOrbState("speaking"); armBargeIn(); }
+  if (voiceMode) setOrbState("speaking");
   const text = speechQueue.shift();
   speakUtterance(text, () => {
     speakingNow = false;
-    if (speechQueue.length) { if (voiceMode) armBargeIn(); pumpSpeech(); }
+    if (speechQueue.length) pumpSpeech();
     else { ttsPlaying = false; if (voiceMode) resumeListening(); }
   });
 }
@@ -1019,6 +1018,20 @@ if (window.speechSynthesis) {
   window.speechSynthesis.onvoiceschanged = () => { cachedVoices = window.speechSynthesis.getVoices() || []; };
   cachedVoices = window.speechSynthesis.getVoices() || [];
 }
+let listening = false;   // true while a recognition instance is actively recording
+let listenTimer = null;  // debounced restart timer (prevents tight listen/speak flicker)
+
+/* Re-arm listening after a short cooldown so the browser can clean up the previous
+   instance (avoids the "listening -> speaking -> listening" flicker and frozen tabs). */
+function scheduleListen() {
+  if (!voiceMode || busy || voiceBusy) return;
+  if (listenTimer) return;
+  listenTimer = setTimeout(() => {
+    listenTimer = null;
+    startListening();
+  }, 350);
+}
+
 function buildRecognition() {
   if (!SpeechRec) return null;
   const r = new SpeechRec();
@@ -1028,28 +1041,42 @@ function buildRecognition() {
   r.onresult = (e) => {
     let interim = "";
     let finalText = "";
+    let confidence = 1;
     for (let i = e.resultIndex; i < e.results.length; i++) {
-      const t = e.results[i][0].transcript;
-      if (e.results[i].isFinal) finalText += (finalText ? " " : "") + t;
-      else interim += t;
-    }
-    if (voiceMode) {
-      if (interim && voiceOrbCaption) voiceOrbCaption.textContent = interim;
-      if (finalText) {
-        clearSpeech(); // barge-in: stop any current reply immediately
-        voiceBusy = true;
-        try { r.stop(); } catch (e2) {} // stop this instance so it can't double-capture
-        setOrbState("thinking");
-        stopViz(); startSpeakViz();
-        send(finalText);
+      const res = e.results[i];
+      const t = res[0].transcript;
+      if (res.isFinal) {
+        finalText += (finalText ? " " : "") + t;
+        if (typeof res[0].confidence === "number") confidence = Math.min(confidence, res[0].confidence);
+      } else {
+        interim += t;
       }
-    } else {
+    }
+    if (!voiceMode) {
       if (finalText) inputEl.value += (inputEl.value ? " " : "") + finalText;
       inputEl.setAttribute("placeholder", interim || "Message Spike…");
       autoResize();
+      return;
+    }
+    if (interim && voiceOrbCaption) voiceOrbCaption.textContent = interim;
+    if (finalText) {
+      const clean = finalText.trim();
+      // Ignore noise / the assistant echoing itself (very short or low-confidence captures).
+      // This is what stops the feedback loop that was freezing the desktop tab.
+      if (clean.length < 2 || (typeof confidence === "number" && confidence < 0.5)) {
+        try { r.stop(); } catch (e2) {} // drop this capture; onend will re-arm
+        return;
+      }
+      clearSpeech(); // barge-in: stop any current reply immediately
+      voiceBusy = true;
+      try { r.stop(); } catch (e2) {} // stop this instance so it can't double-capture
+      setOrbState("thinking");
+      stopViz(); startSpeakViz();
+      send(clean);
     }
   };
   r.onend = () => {
+    listening = false;
     if (!voiceMode) {
       micActive = false;
       micBtn.classList.remove("recording");
@@ -1057,10 +1084,11 @@ function buildRecognition() {
       if (inputEl.value.trim()) autoResize();
       return;
     }
-    if (ttsPlaying) return; // still speaking; onEnd will resume listening
-    if (!voiceBusy) startListening();
+    if (ttsPlaying || voiceBusy) return; // a later step will re-arm listening
+    scheduleListen();
   };
   r.onerror = (e) => {
+    listening = false;
     if (!voiceMode) {
       micActive = false;
       micBtn.classList.remove("recording");
@@ -1069,7 +1097,7 @@ function buildRecognition() {
       toast("Microphone permission denied");
       closeVoiceMode();
     } else if (!voiceBusy) {
-      startListening();
+      scheduleListen(); // transient error (no-speech/network) -> re-arm after cooldown
     }
   };
   return r;
@@ -1196,6 +1224,8 @@ async function openVoiceMode() {
 function closeVoiceMode() {
   voiceMode = false;
   voiceBusy = false;
+  listening = false;
+  if (listenTimer) { clearTimeout(listenTimer); listenTimer = null; }
   if (voiceAssistBtn) voiceAssistBtn.classList.remove("active");
   if (voiceOrb) voiceOrb.hidden = true;
   stopViz();
@@ -1213,12 +1243,15 @@ function startVoiceListening() {
 }
 function startListening() {
   if (!voiceMode || !SpeechRec || busy || voiceBusy) return;
+  if (listening) return; // already recording (guard against double-start)
+  if (recognition) { try { recognition.stop(); } catch (e) {} } // stop any lingering instance
+  listening = true;
   recognition = buildRecognition(); // fresh instance avoids Android Web Speech degradation
-  if (!recognition) return;
+  if (!recognition) { listening = false; return; }
   setOrbState("listening");
   stopViz(); startMicViz();
   try { recognition.start(); }
-  catch (e) { try { recognition = buildRecognition(); recognition.start(); } catch (e2) {} }
+  catch (e) { listening = false; scheduleListen(); } // retry after cooldown
 }
 function resumeListening() {
   if (!voiceMode) return;
@@ -1319,17 +1352,17 @@ async function processCloudAudio(blob) {
   }
 }
 
-/* Keep recognition armed while Spike is speaking so the user can interrupt (Web Speech only) */
-function armBargeIn() {
-  if (!voiceMode || !hasWebSpeech || busy) return;
-  try { recognition.start(); } catch (e) { /* already started */ }
-}
 /* Tap the orb to stop the current reply and listen to the user immediately */
 function bargeIn() {
   if (!voiceMode) return;
   clearSpeech();
+  voiceBusy = false;
+  ttsPlaying = false;
+  if (recognition) { try { recognition.stop(); } catch (e) {} }
+  listening = false;
+  if (listenTimer) { clearTimeout(listenTimer); listenTimer = null; }
   setOrbState("listening");
-  startVoiceListening();
+  scheduleListen();
 }
 
 if (voiceAssistBtn) {
