@@ -184,6 +184,7 @@ body { background-image: var(--bg-grad); background-attachment: fixed; }
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 8px;
 }
 .sidebar-footer .status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -888,7 +889,7 @@ html.dark .ico-moon { display: inline-block; }
 .auth-forgot { display: block; width: 100%; margin: 14px 0 4px; text-align: center; }
 
 /* Account area in sidebar */
-.account-area { display: flex; align-items: center; padding: 0 2px; }
+.account-area { display: flex; align-items: center; padding: 0 2px; flex: 1 1 auto; min-width: 0; }
 .account-info { min-width: 0; }
 .account-name { font-size: 13px; font-weight: 700; color: var(--text, #1c1a2e); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .account-email { font-size: 11.5px; color: var(--text-2, #5b5876); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

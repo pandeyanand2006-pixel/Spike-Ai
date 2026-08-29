@@ -1019,14 +1019,13 @@ if (window.speechSynthesis) {
   window.speechSynthesis.onvoiceschanged = () => { cachedVoices = window.speechSynthesis.getVoices() || []; };
   cachedVoices = window.speechSynthesis.getVoices() || [];
 }
-if (SpeechRec) {
-  recognition = new SpeechRec();
-  recognition.continuous = false;
-  recognition.interimResults = true;
-  recognition.lang = "en-US";
-}
-if (recognition) {
-  recognition.onresult = (e) => {
+function buildRecognition() {
+  if (!SpeechRec) return null;
+  const r = new SpeechRec();
+  r.continuous = false;
+  r.interimResults = true;
+  r.lang = "en-US";
+  r.onresult = (e) => {
     let interim = "";
     let finalText = "";
     for (let i = e.resultIndex; i < e.results.length; i++) {
@@ -1039,6 +1038,7 @@ if (recognition) {
       if (finalText) {
         clearSpeech(); // barge-in: stop any current reply immediately
         voiceBusy = true;
+        try { r.stop(); } catch (e2) {} // stop this instance so it can't double-capture
         setOrbState("thinking");
         stopViz(); startSpeakViz();
         send(finalText);
@@ -1049,7 +1049,7 @@ if (recognition) {
       autoResize();
     }
   };
-  recognition.onend = () => {
+  r.onend = () => {
     if (!voiceMode) {
       micActive = false;
       micBtn.classList.remove("recording");
@@ -1060,7 +1060,7 @@ if (recognition) {
     if (ttsPlaying) return; // still speaking; onEnd will resume listening
     if (!voiceBusy) startListening();
   };
-  recognition.onerror = (e) => {
+  r.onerror = (e) => {
     if (!voiceMode) {
       micActive = false;
       micBtn.classList.remove("recording");
@@ -1072,10 +1072,15 @@ if (recognition) {
       startListening();
     }
   };
+  return r;
+}
+recognition = buildRecognition();
+if (SpeechRec) {
   micBtn.addEventListener("click", () => {
     if (voiceMode) return; // the orb owns the mic in voice mode
     if (busy) return;
     if (micActive) { recognition.stop(); micActive = false; micBtn.classList.remove("recording"); return; }
+    recognition = buildRecognition();
     try {
       recognition.start();
       micActive = true;
@@ -1207,10 +1212,13 @@ function startVoiceListening() {
   else startCloudListening();
 }
 function startListening() {
-  if (!voiceMode || !recognition || busy) return;
+  if (!voiceMode || !SpeechRec || busy || voiceBusy) return;
+  recognition = buildRecognition(); // fresh instance avoids Android Web Speech degradation
+  if (!recognition) return;
   setOrbState("listening");
   stopViz(); startMicViz();
-  try { recognition.start(); } catch (e) { /* already started */ }
+  try { recognition.start(); }
+  catch (e) { try { recognition = buildRecognition(); recognition.start(); } catch (e2) {} }
 }
 function resumeListening() {
   if (!voiceMode) return;
