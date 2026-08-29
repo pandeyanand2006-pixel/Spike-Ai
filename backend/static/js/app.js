@@ -34,7 +34,6 @@ const toastEl = document.getElementById("toast");
 const scrollFab = document.getElementById("scroll-fab");
 const micBtn = document.getElementById("mic-btn");
 const voiceAssistBtn = document.getElementById("voice-assist-btn");
-let voiceAssist = localStorage.getItem("voiceAssist") === "1";
 
 /* ---------- Auth ---------- */
 const authScreen = document.getElementById("auth-screen");
@@ -422,7 +421,7 @@ function renderChatList() {
     });
     const del = document.createElement("button");
     del.className = "delete";
-    del.innerHTML = "&#10005;";
+    del.innerHTML = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14"/></svg>';
     del.title = "Delete";
     del.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -657,6 +656,11 @@ function send(textOverride) {
                 content: TOOL_PREFIX + JSON.stringify(data.tool),
               });
               save();
+              if (voiceMode) {
+                voiceBusy = false;
+                setOrbState("speaking");
+                speakText("Here's what you asked for.", () => { if (voiceMode) resumeListening(); });
+              }
               continue;
             }
             if (!shell) { shell = addAssistantShell(); contentEl = shell.querySelector(".msg-content"); }
@@ -697,7 +701,10 @@ function send(textOverride) {
           addActions(shell, full);
           save();
           updateChatTitle(chat, full);
-          if (voiceAssist) speakText(full);
+          if (voiceMode) {
+            setOrbState("speaking");
+            speakText(full, () => { if (voiceMode) resumeListening(); });
+          }
         }
       }
       scrollBottom();
@@ -774,11 +781,12 @@ function regenerate() {
 }
 
 /* ---------- Actions delegation ---------- */
-function speakText(text) {
-  if (!window.speechSynthesis) { toast("Speech not supported"); return; }
+function speakText(text, onEnd) {
+  if (!window.speechSynthesis) { toast("Speech not supported"); if (onEnd) onEnd(); return; }
   window.speechSynthesis.cancel();
   const u = new SpeechSynthesisUtterance(text.replace(/[#*`_>\[\]]/g, " "));
   u.rate = 1; u.pitch = 1;
+  if (onEnd) u.onend = onEnd;
   window.speechSynthesis.speak(u);
 }
 
@@ -833,11 +841,11 @@ function checkHealth() {
     .then((r) => r.json())
     .then((d) => {
       statusEl.className = "status " + (d.status === "ok" ? "online" : "error");
-      statusEl.textContent = d.status === "ok" ? "Online" : "API key missing";
+      statusEl.textContent = "";
     })
     .catch(() => {
       statusEl.className = "status error";
-      statusEl.textContent = "Offline";
+      statusEl.textContent = "";
     });
 }
 
@@ -852,14 +860,6 @@ function applyTheme(mode) {
   root.classList.remove("light", "dark");
   if (mode === "light") root.classList.add("light");
   else if (mode === "dark") root.classList.add("dark");
-  // update icon
-  if (themeIco) {
-    if (mode === "dark") {
-      themeIco.setAttribute("d", "M12 3a9 9 0 1 0 0 18zm0 2v14a7 7 0 0 1 0-14z");
-    } else {
-      themeIco.setAttribute("d", "M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10zm0-14v2m0 14v2m7.07-12.93-1.41 1.41M6.34 17.66l-1.41 1.41m14.14-7.07-1.41-1.41M5.2 6.34 6.6 7.75M9 4a3 3 0 0 0 6 0z");
-    }
-  }
 }
 function nextTheme() {
   const root = document.documentElement;
@@ -947,26 +947,50 @@ if (SpeechRec) {
 if (recognition) {
   recognition.onresult = (e) => {
     let interim = "";
+    let finalText = "";
     for (let i = e.resultIndex; i < e.results.length; i++) {
       const t = e.results[i][0].transcript;
-      if (e.results[i].isFinal) inputEl.value += (inputEl.value ? " " : "") + t;
+      if (e.results[i].isFinal) finalText += (finalText ? " " : "") + t;
       else interim += t;
     }
-    inputEl.setAttribute("placeholder", interim || "Message Spike…");
-    autoResize();
+    if (voiceMode) {
+      if (interim && voiceOrbCaption) voiceOrbCaption.textContent = interim;
+      if (finalText) {
+        voiceBusy = true;
+        setOrbState("thinking");
+        stopViz(); startSpeakViz();
+        send(finalText);
+      }
+    } else {
+      if (finalText) inputEl.value += (inputEl.value ? " " : "") + finalText;
+      inputEl.setAttribute("placeholder", interim || "Message Spike…");
+      autoResize();
+    }
   };
   recognition.onend = () => {
-    micActive = false;
-    micBtn.classList.remove("recording");
-    inputEl.setAttribute("placeholder", "Message Spike…");
-    if (inputEl.value.trim()) autoResize();
+    if (!voiceMode) {
+      micActive = false;
+      micBtn.classList.remove("recording");
+      inputEl.setAttribute("placeholder", "Message Spike…");
+      if (inputEl.value.trim()) autoResize();
+      return;
+    }
+    if (!voiceBusy) startListening();
   };
   recognition.onerror = (e) => {
-    micActive = false;
-    micBtn.classList.remove("recording");
-    toast("Mic: " + (e.error || "error"));
+    if (!voiceMode) {
+      micActive = false;
+      micBtn.classList.remove("recording");
+      toast("Mic: " + (e.error || "error"));
+    } else if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+      toast("Microphone permission denied");
+      closeVoiceMode();
+    } else if (!voiceBusy) {
+      startListening();
+    }
   };
   micBtn.addEventListener("click", () => {
+    if (voiceMode) return; // the orb owns the mic in voice mode
     if (busy) return;
     if (micActive) { recognition.stop(); micActive = false; micBtn.classList.remove("recording"); return; }
     try {
@@ -980,18 +1004,115 @@ if (recognition) {
   micBtn.style.display = "none";
 }
 
-/* ---------- Voice assistant (read replies aloud) ---------- */
+/* ---------- AI Voice Assistant (Gemini-style voice orb) ---------- */
+const voiceOrb = document.getElementById("voice-orb");
+const voiceOrbCircle = document.getElementById("voice-orb-circle");
+const voiceOrbCore = document.getElementById("voice-orb-core");
+const voiceOrbCaption = document.getElementById("voice-orb-caption");
+const voiceOrbClose = document.getElementById("voice-orb-close");
+const voiceOrbBackdrop = document.getElementById("voice-orb-backdrop");
+
+let voiceMode = false;   // true while the voice orb is open
+let voiceBusy = false;   // true while Spike is thinking/speaking
+
+function setOrbState(state) {
+  if (!voiceOrbCircle) return;
+  voiceOrbCircle.classList.remove("listening", "thinking", "speaking");
+  if (state === "listening" || state === "thinking") voiceOrbCircle.classList.add(state);
+  else if (state === "speaking") voiceOrbCircle.classList.add("speaking");
+  if (voiceOrbCaption) {
+    voiceOrbCaption.textContent =
+      state === "listening" ? "Listening…" :
+      state === "thinking" ? "Spike is thinking…" :
+      state === "speaking" ? "Spike is speaking…" : "Tap to talk";
+  }
+}
+
+/* Mic amplitude visualizer (drives the orb core while you talk) */
+let voiceMicStream = null, voiceAudioCtx = null, voiceAnalyser = null;
+let voiceRafMic = null, voiceRafSpk = null;
+function startMicViz() {
+  if (!voiceAnalyser || !voiceOrbCore) return;
+  const data = new Uint8Array(voiceAnalyser.frequencyBinCount);
+  const tick = () => {
+    voiceAnalyser.getByteTimeDomainData(data);
+    let sum = 0;
+    for (let i = 0; i < data.length; i++) { const v = (data[i] - 128) / 128; sum += v * v; }
+    const rms = Math.sqrt(sum / data.length);
+    const scale = 1 + Math.min(1.4, rms * 5);
+    voiceOrbCore.style.transform = "scale(" + scale.toFixed(3) + ")";
+    voiceRafMic = requestAnimationFrame(tick);
+  };
+  tick();
+}
+function startSpeakViz() {
+  if (!voiceOrbCore) return;
+  let t = 0;
+  const tick = () => {
+    t += 0.18;
+    const s = 1 + 0.55 * (0.5 + 0.5 * Math.sin(t));
+    voiceOrbCore.style.transform = "scale(" + s.toFixed(3) + ")";
+    voiceRafSpk = requestAnimationFrame(tick);
+  };
+  tick();
+}
+function stopViz() {
+  if (voiceRafMic) cancelAnimationFrame(voiceRafMic);
+  if (voiceRafSpk) cancelAnimationFrame(voiceRafSpk);
+  voiceRafMic = voiceRafSpk = null;
+  if (voiceOrbCore) voiceOrbCore.style.transform = "";
+}
+
+async function openVoiceMode() {
+  if (!SpeechRec) { toast("Voice input not supported on this browser"); return; }
+  voiceMode = true;
+  if (voiceAssistBtn) voiceAssistBtn.classList.add("active");
+  if (voiceOrb) voiceOrb.hidden = false;
+  setOrbState("listening");
+  // best-effort mic stream for the amplitude visualizer
+  try {
+    voiceMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    voiceAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = voiceAudioCtx.createMediaStreamSource(voiceMicStream);
+    voiceAnalyser = voiceAudioCtx.createAnalyser();
+    voiceAnalyser.fftSize = 256;
+    src.connect(voiceAnalyser);
+  } catch (e) { voiceMicStream = null; voiceAnalyser = null; }
+  startMicViz();
+  startListening();
+}
+function closeVoiceMode() {
+  voiceMode = false;
+  voiceBusy = false;
+  if (voiceAssistBtn) voiceAssistBtn.classList.remove("active");
+  if (voiceOrb) voiceOrb.hidden = true;
+  stopViz();
+  if (recognition) { try { recognition.stop(); } catch (e) {} }
+  window.speechSynthesis.cancel();
+  if (voiceMicStream) voiceMicStream.getTracks().forEach((t) => t.stop());
+  if (voiceAudioCtx) { try { voiceAudioCtx.close(); } catch (e) {} }
+  voiceMicStream = null; voiceAudioCtx = null; voiceAnalyser = null;
+}
+function startListening() {
+  if (!voiceMode || !recognition || busy) return;
+  setOrbState("listening");
+  stopViz(); startMicViz();
+  try { recognition.start(); } catch (e) { /* already started */ }
+}
+function resumeListening() {
+  if (!voiceMode) return;
+  voiceBusy = false;
+  startListening();
+}
+
 if (voiceAssistBtn) {
-  if (voiceAssist) voiceAssistBtn.classList.add("active");
   voiceAssistBtn.addEventListener("click", () => {
-    if (!window.speechSynthesis) { toast("Voice playback not supported"); return; }
-    voiceAssist = !voiceAssist;
-    voiceAssistBtn.classList.toggle("active", voiceAssist);
-    localStorage.setItem("voiceAssist", voiceAssist ? "1" : "0");
-    toast(voiceAssist ? "Voice assistant on — replies will be read aloud" : "Voice assistant off");
-    if (!voiceAssist) window.speechSynthesis.cancel();
+    if (voiceMode) closeVoiceMode();
+    else openVoiceMode();
   });
 }
+if (voiceOrbClose) voiceOrbClose.addEventListener("click", closeVoiceMode);
+if (voiceOrbBackdrop) voiceOrbBackdrop.addEventListener("click", closeVoiceMode);
 
 /* ---------- Events ---------- */
 formEl.addEventListener("submit", (e) => { e.preventDefault(); send(); });
@@ -1316,7 +1437,7 @@ async function verifyAndEnter(token) {
 
 /* ---------- Init (enforced login state machine) ---------- */
 async function init() {
-  applyTheme(localStorage.getItem(THEME_KEY) || "auto");
+  applyTheme(localStorage.getItem(THEME_KEY) || "light");
   renderConversation();
   checkHealth();
   setInterval(checkHealth, 30000);
