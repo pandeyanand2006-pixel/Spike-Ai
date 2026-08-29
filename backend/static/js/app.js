@@ -1041,16 +1041,11 @@ function buildRecognition() {
   r.onresult = (e) => {
     let interim = "";
     let finalText = "";
-    let confidence = 1;
     for (let i = e.resultIndex; i < e.results.length; i++) {
       const res = e.results[i];
       const t = res[0].transcript;
-      if (res.isFinal) {
-        finalText += (finalText ? " " : "") + t;
-        if (typeof res[0].confidence === "number") confidence = Math.min(confidence, res[0].confidence);
-      } else {
-        interim += t;
-      }
+      if (res.isFinal) finalText += (finalText ? " " : "") + t;
+      else interim += t;
     }
     if (!voiceMode) {
       if (finalText) inputEl.value += (inputEl.value ? " " : "") + finalText;
@@ -1061,9 +1056,8 @@ function buildRecognition() {
     if (interim && voiceOrbCaption) voiceOrbCaption.textContent = interim;
     if (finalText) {
       const clean = finalText.trim();
-      // Ignore noise / the assistant echoing itself (very short or low-confidence captures).
-      // This is what stops the feedback loop that was freezing the desktop tab.
-      if (clean.length < 2 || (typeof confidence === "number" && confidence < 0.5)) {
+      // Ignore empty / punctuation-only captures (real speech is longer).
+      if (clean.length < 2) {
         try { r.stop(); } catch (e2) {} // drop this capture; onend will re-arm
         return;
       }
