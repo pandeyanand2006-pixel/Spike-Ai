@@ -1235,12 +1235,10 @@ async function processCloudAudio(blob) {
   setOrbState("thinking");
   stopViz(); startSpeakViz();
   try {
-    const fd = new FormData();
-    fd.append("file", blob, "audio.webm");
-    const headers = {};
+    const headers = { "Content-Type": blob.type || "audio/webm" };
     const tk = getToken();
     if (tk) headers["Authorization"] = "Bearer " + tk;
-    const r = await fetch("/api/voice/transcribe", { method: "POST", body: fd, headers });
+    const r = await fetch("/api/voice/transcribe", { method: "POST", body: blob, headers });
     const j = await r.json().catch(() => ({}));
     const text = (j.text || "").trim();
     if (text) { voiceBusy = true; send(text); }
