@@ -215,22 +215,22 @@ body { background-image: var(--bg-grad); background-attachment: fixed; }
   align-items: center;
   gap: 12px;
   padding: 12px 24px;
-  background: linear-gradient(135deg, #211c45 0%, #2c2757 60%, #34306b 100%);
-  color: #fff;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: 0 6px 22px rgba(20, 16, 50, 0.20);
+  background: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 0 rgba(31, 32, 48, 0.04);
 }
-.dark .chat-header { background: linear-gradient(135deg, #15132e 0%, #211d44 60%, #282455 100%); }
-.toggle-sidebar { color: rgba(255, 255, 255, 0.72); }
-.toggle-sidebar:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
-.chat-name-pill { color: rgba(255, 255, 255, 0.72); }
-.header-actions .icon-btn { color: rgba(255, 255, 255, 0.72); }
-.header-actions .icon-btn:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
+.dark .chat-header { background: rgba(24, 23, 38, 0.82); }
+.toggle-sidebar { color: var(--text-2); }
+.toggle-sidebar:hover { background: var(--chip-bg); color: var(--text); }
+.chat-name-pill { color: var(--text-2); }
+.header-actions .icon-btn { color: var(--text-2); }
+.header-actions .icon-btn:hover { background: var(--chip-bg); color: var(--text); }
 .clear-btn {
-  background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.16);
-  color: rgba(255, 255, 255, 0.82); box-shadow: none;
+  background: var(--surface); border: 1px solid var(--border);
+  color: var(--text-2); box-shadow: var(--shadow);
 }
-.clear-btn:hover { color: #fff; border-color: rgba(255, 255, 255, 0.45); transform: translateY(-1px); }
+.clear-btn:hover { color: #ef4444; border-color: rgba(239, 68, 68, 0.5); transform: translateY(-1px); }
 
 .toggle-sidebar {
   background: none; border: none; color: var(--text-2); font-size: 20px;

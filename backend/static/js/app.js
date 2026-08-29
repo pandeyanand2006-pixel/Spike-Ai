@@ -660,6 +660,7 @@ function send(textOverride) {
                 voiceBusy = false;
                 setOrbState("speaking");
                 speakText("Here's what you asked for.", () => { if (voiceMode) resumeListening(); });
+                armBargeIn();
               }
               continue;
             }
@@ -704,6 +705,7 @@ function send(textOverride) {
           if (voiceMode) {
             setOrbState("speaking");
             speakText(full, () => { if (voiceMode) resumeListening(); });
+            armBargeIn();
           }
         }
       }
@@ -781,12 +783,29 @@ function regenerate() {
 }
 
 /* ---------- Actions delegation ---------- */
+let cachedVoices = [];
+let ttsPlaying = false;
+function pickFemaleVoice() {
+  if (!cachedVoices.length && window.speechSynthesis) cachedVoices = window.speechSynthesis.getVoices() || [];
+  if (!cachedVoices.length) return null;
+  const prefer = cachedVoices.find((v) =>
+    /female|samantha|zira|jenny|aria|google us english|tessa|victoria|karen|moira|anna|libby|natural|susan|hazel|emma|ruby|scarlett|allison|ava/i.test(v.name)
+  );
+  if (prefer) return prefer;
+  const en = cachedVoices.find((v) => /^en(-|_)/i.test(v.lang));
+  return en || cachedVoices[0];
+}
 function speakText(text, onEnd) {
+  const plain = (text || "").replace(/[#*`_>\[\]]/g, " ");
   if (!window.speechSynthesis) { toast("Speech not supported"); if (onEnd) onEnd(); return; }
   window.speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text.replace(/[#*`_>\[\]]/g, " "));
-  u.rate = 1; u.pitch = 1;
-  if (onEnd) u.onend = onEnd;
+  const u = new SpeechSynthesisUtterance(plain);
+  u.rate = 1; u.pitch = 1.05;
+  const v = pickFemaleVoice();
+  if (v) u.voice = v;
+  ttsPlaying = true;
+  if (onEnd) u.onend = () => { ttsPlaying = false; onEnd(); };
+  u.onerror = () => { ttsPlaying = false; };
   window.speechSynthesis.speak(u);
 }
 
@@ -938,6 +957,10 @@ exportBtn.addEventListener("click", () => {
 const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
 let recognition = null;
 let micActive = false;
+if (window.speechSynthesis) {
+  window.speechSynthesis.onvoiceschanged = () => { cachedVoices = window.speechSynthesis.getVoices() || []; };
+  cachedVoices = window.speechSynthesis.getVoices() || [];
+}
 if (SpeechRec) {
   recognition = new SpeechRec();
   recognition.continuous = false;
@@ -956,6 +979,8 @@ if (recognition) {
     if (voiceMode) {
       if (interim && voiceOrbCaption) voiceOrbCaption.textContent = interim;
       if (finalText) {
+        window.speechSynthesis.cancel(); // barge-in: stop any current reply
+        ttsPlaying = false;
         voiceBusy = true;
         setOrbState("thinking");
         stopViz(); startSpeakViz();
@@ -975,6 +1000,7 @@ if (recognition) {
       if (inputEl.value.trim()) autoResize();
       return;
     }
+    if (ttsPlaying) return; // still speaking; onEnd will resume listening
     if (!voiceBusy) startListening();
   };
   recognition.onerror = (e) => {
@@ -1079,7 +1105,11 @@ async function openVoiceMode() {
     src.connect(voiceAnalyser);
   } catch (e) { voiceMicStream = null; voiceAnalyser = null; }
   startMicViz();
-  startListening();
+  // Greet the user (female voice) then start listening
+  stopViz(); startSpeakViz();
+  setOrbState("speaking");
+  ttsPlaying = true;
+  speakText("Hey, I'm Spike. How can I help you?", () => { if (voiceMode) startListening(); });
 }
 function closeVoiceMode() {
   voiceMode = false;
@@ -1104,6 +1134,19 @@ function resumeListening() {
   voiceBusy = false;
   startListening();
 }
+/* Keep recognition armed while Spike is speaking so the user can interrupt */
+function armBargeIn() {
+  if (!voiceMode || !recognition || busy) return;
+  try { recognition.start(); } catch (e) { /* already started */ }
+}
+/* Tap the orb to stop the current reply and listen to the user immediately */
+function bargeIn() {
+  if (!voiceMode) return;
+  window.speechSynthesis.cancel();
+  ttsPlaying = false;
+  setOrbState("listening");
+  startListening();
+}
 
 if (voiceAssistBtn) {
   voiceAssistBtn.addEventListener("click", () => {
@@ -1113,6 +1156,7 @@ if (voiceAssistBtn) {
 }
 if (voiceOrbClose) voiceOrbClose.addEventListener("click", closeVoiceMode);
 if (voiceOrbBackdrop) voiceOrbBackdrop.addEventListener("click", closeVoiceMode);
+if (voiceOrbCircle) voiceOrbCircle.addEventListener("click", bargeIn);
 
 /* ---------- Events ---------- */
 formEl.addEventListener("submit", (e) => { e.preventDefault(); send(); });
