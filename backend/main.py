@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import agent, auth, chat, conversations, meta, projects, voice
+from app.api import agent, auth, bridge, chat, conversations, meta, projects, voice
 from app.config import STATIC_DIR, get_settings
 
 
@@ -42,6 +42,7 @@ app.include_router(chat.router)
 app.include_router(voice.router)
 app.include_router(agent.router)
 app.include_router(projects.router)
+app.include_router(bridge.router)
 
 
 @app.get("/")

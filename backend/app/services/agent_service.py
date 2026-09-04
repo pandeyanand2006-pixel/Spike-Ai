@@ -19,6 +19,7 @@ from app.services.agent_tools import (
     is_dangerous_command,
     mask_secrets,
 )
+from app.services.workspace_service import is_local_workspace
 
 # ---------- System prompts ----------
 
@@ -201,13 +202,39 @@ async def call_llm(messages: List[Dict[str, str]], model: Optional[str] = None) 
         return f"LLM error: {e}"
 
 
-async def execute_tool(tool: str, inp: Dict[str, Any], mode: str, workspace: Path | None = None) -> Dict[str, Any]:
-    """Execute a registered tool with permission checks (workspace-aware)."""
+async def execute_tool(tool: str, inp: Dict[str, Any], mode: str, workspace: Path | None = None, project_info: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """Execute a registered tool with permission checks (workspace-aware). For local projects, forward to bridge."""
     if mode == "plan" and tool not in READ_TOOLS:
         return {"success": False, "output": f"Tool '{tool}' is not allowed in Plan mode (read-only). Switch to Build to modify files/run commands."}
     if tool in DESTRUCTIVE_TOOLS and mode != "build":
         return {"success": False, "output": f"Tool '{tool}' requires Build mode."}
-    registry = get_tool_registry(workspace) if workspace is not None else TOOL_REGISTRY
+    # If this is a local project, forward to the local bridge
+    is_local = False
+    if project_info and is_local_workspace(project_info.get("workspace", "")):
+        is_local = True
+    elif workspace and is_local_workspace(str(workspace)):
+        is_local = True
+    if is_local:
+        # Forward to local bridge
+        try:
+            from app.api.bridge import forward_tool_to_bridge
+            # Need user_id and project_id from project_info
+            # project_info should contain projectId, but we don't have it here directly
+            # We can try to get it from workspace or project_info
+            # For now, we need to handle this in stream_agent_loop where we have project_id
+            # This fallback will be handled there
+            pass
+        except Exception:
+            pass
+        # If we are in local mode but no bridge forwarding is set up in this context, return offline message
+        # The actual forwarding will be done in stream_agent_loop which has project_id
+        if is_local and project_info is None:
+            return {"success": False, "output": "Local workspace detected but bridge forwarding not configured in this context."}
+    registry = get_tool_registry(workspace) if workspace is not None and not is_local else TOOL_REGISTRY
+    # For local, we will handle forwarding in the caller (stream_agent_loop) instead
+    if is_local:
+        # This will be handled by the caller with proper project_id
+        return {"success": False, "output": "Local tool execution should be forwarded via bridge (caller handles)."}
     entry = registry.get(tool)
     if not entry:
         return {"success": False, "output": f"Unknown tool: {tool}"}
@@ -238,18 +265,23 @@ async def stream_agent_loop(
     history: List[Dict[str, str]],
     workspace: Path | None = None,
     project_info: Dict[str, Any] | None = None,
+    user_id: Optional[str] = None,
+    project_id: Optional[str] = None,
 ) -> AsyncGenerator[Dict[str, Any], None]:
-    """Core agent loop — yields structured events (workspace-aware)."""
+    """Core agent loop — yields structured events (workspace-aware, local bridge support)."""
     system = build_system_prompt(mode or "build")
-    # Inject project context if available
+    is_local = bool(project_info and is_local_workspace(project_info.get("workspace", "")))
     if project_info:
         proj_ctx = f"\n\nCURRENT PROJECT:\nName: {project_info.get('name','')}\nWorkspace: {project_info.get('workspace','')}\nStack: {project_info.get('stack','')}\nTemplate: {project_info.get('template','')}\n"
         if project_info.get("description"):
             proj_ctx += f"Description: {project_info['description']}\n"
+        if is_local:
+            proj_ctx += "Workspace type: LOCAL (files are on user's Windows PC, accessed via Local Bridge)\n"
         system += proj_ctx
-        # Also hint the model about workspace root
-        if workspace is not None:
+        if workspace is not None and not is_local:
             system += f"\nAll file paths are relative to this project's workspace root. Do not use absolute paths.\n"
+        if is_local:
+            system += "\nAll file paths are relative to the LOCAL project root on the user's PC. Use relative paths only.\n"
     # Seed messages: system + optional history + current task (trimmed for TPM)
     messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
     for m in history[-8:]:
@@ -259,7 +291,14 @@ async def stream_agent_loop(
 
     # Always start with a quick project inspection to ground the LLM
     yield {"type": "thinking", "content": "Inspecting project…"}
-    insp = await execute_tool("inspect_project", {}, mode, workspace=workspace)
+    if is_local and user_id and project_id:
+        try:
+            from app.api.bridge import forward_tool_to_bridge
+            insp = await forward_tool_to_bridge(user_id, project_id, "inspect_project", {}, timeout=15.0)
+        except Exception as e:
+            insp = {"success": False, "output": f"Local bridge error: {e}"}
+    else:
+        insp = await execute_tool("inspect_project", {}, mode, workspace=workspace, project_info=project_info)
     yield {"type": "tool_start", "tool": "inspect_project", "input": {}}
     yield {"type": "tool_result", "tool": "inspect_project", "success": insp["success"], "output": insp["output"][:3000]}
     messages.append({"role": "assistant", "content": json.dumps({"tool": "inspect_project", "input": {}})})
@@ -321,7 +360,16 @@ async def stream_agent_loop(
             # In strict mode you'd wait; here we continue.
 
         yield {"type": "tool_start", "tool": tool, "input": inp}
-        result = await execute_tool(tool, inp, mode, workspace=workspace)
+        if is_local and user_id and project_id:
+            try:
+                from app.api.bridge import forward_tool_to_bridge
+                # Map tool timeout: longer for run_command
+                tmo = 60.0 if tool == "run_command" else 30.0
+                result = await forward_tool_to_bridge(user_id, project_id, tool, inp, timeout=tmo)
+            except Exception as e:
+                result = {"success": False, "output": f"Local bridge error: {e}"}
+        else:
+            result = await execute_tool(tool, inp, mode, workspace=workspace, project_info=project_info)
         # Track changed files
         if tool in ("write_file", "edit_file") and result.get("success"):
             p = inp.get("path")

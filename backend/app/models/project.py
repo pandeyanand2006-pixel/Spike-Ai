@@ -11,10 +11,22 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _safe_oid(val: Optional[str]) -> Optional[ObjectId]:
+    if not val or val in ("null", "undefined", "NaN", "None"):
+        return None
+    try:
+        return ObjectId(str(val).strip())
+    except Exception:
+        return None
+
+
 async def create_project(user_id: str, name: str, description: str, template: str, workspace: str, stack: str) -> dict:
+    uid = _safe_oid(user_id)
+    if uid is None:
+        raise ValueError(f"Invalid user_id: {user_id}")
     now = _now()
     doc = {
-        "userId": ObjectId(user_id),
+        "userId": uid,
         "name": name.strip()[:80],
         "description": (description or "")[:300],
         "template": template or "other",
@@ -31,8 +43,12 @@ async def create_project(user_id: str, name: str, description: str, template: st
 
 
 async def get_project(user_id: str, project_id: str) -> Optional[dict]:
+    uid = _safe_oid(user_id)
+    pid = _safe_oid(project_id)
+    if uid is None or pid is None:
+        return None
     try:
-        doc = await get_db().projects.find_one({"_id": ObjectId(project_id), "userId": ObjectId(user_id)})
+        doc = await get_db().projects.find_one({"_id": pid, "userId": uid})
     except Exception:
         return None
     if not doc:
@@ -42,22 +58,34 @@ async def get_project(user_id: str, project_id: str) -> Optional[dict]:
 
 
 async def list_projects(user_id: str, search: str = "") -> List[dict]:
-    q: dict = {"userId": ObjectId(user_id)}
+    uid = _safe_oid(user_id)
+    if uid is None:
+        return []
+    q: dict = {"userId": uid}
     if search:
         q["name"] = {"$regex": search, "$options": "i"}
-    cursor = get_db().projects.find(q).sort("lastOpenedAt", -1).limit(100)
-    out = []
-    async for doc in cursor:
-        doc["id"] = str(doc["_id"])
-        out.append(doc)
-    return out
+    try:
+        cursor = get_db().projects.find(q).sort("lastOpenedAt", -1).limit(100)
+        out = []
+        async for doc in cursor:
+            doc["id"] = str(doc["_id"])
+            out.append(doc)
+        return out
+    except Exception as e:
+        import logging
+        logging.getLogger("uvicorn.error").error(f"list_projects failed: {e}", exc_info=True)
+        return []
 
 
 async def update_project(user_id: str, project_id: str, fields: dict) -> bool:
+    uid = _safe_oid(user_id)
+    pid = _safe_oid(project_id)
+    if uid is None or pid is None:
+        return False
     fields["updatedAt"] = _now()
     try:
         res = await get_db().projects.update_one(
-            {"_id": ObjectId(project_id), "userId": ObjectId(user_id)},
+            {"_id": pid, "userId": uid},
             {"$set": fields},
         )
         return res.modified_count > 0
@@ -66,9 +94,13 @@ async def update_project(user_id: str, project_id: str, fields: dict) -> bool:
 
 
 async def touch_project(user_id: str, project_id: str):
+    uid = _safe_oid(user_id)
+    pid = _safe_oid(project_id)
+    if uid is None or pid is None:
+        return
     try:
         await get_db().projects.update_one(
-            {"_id": ObjectId(project_id), "userId": ObjectId(user_id)},
+            {"_id": pid, "userId": uid},
             {"$set": {"lastOpenedAt": _now(), "updatedAt": _now()}},
         )
     except Exception:
@@ -76,11 +108,13 @@ async def touch_project(user_id: str, project_id: str):
 
 
 async def delete_project(user_id: str, project_id: str) -> bool:
+    pid = _safe_oid(project_id)
+    uid = _safe_oid(user_id)
+    if pid is None or uid is None:
+        return False
     try:
-        oid = ObjectId(project_id)
+        res = await get_db().projects.delete_one({"_id": pid, "userId": uid})
+        await get_db().agent_sessions.delete_many({"userId": uid, "projectId": pid})
+        return res.deleted_count > 0
     except Exception:
         return False
-    res = await get_db().projects.delete_one({"_id": oid, "userId": ObjectId(user_id)})
-    # Also delete agent sessions for this project
-    await get_db().agent_sessions.delete_many({"userId": ObjectId(user_id), "projectId": oid})
-    return res.deleted_count > 0

@@ -61,11 +61,14 @@ async def create_project(req: ProjectCreate, user: dict = Depends(get_current_us
 
 @router.get("")
 async def list_projects(search: Optional[str] = Query(None), user: dict = Depends(get_current_user)):
-    items = await proj_model.list_projects(user["id"], search or "")
-    # Refresh stack detection lazily
+    try:
+        items = await proj_model.list_projects(user["id"], search or "")
+    except Exception as e:
+        import logging, traceback
+        logging.getLogger("uvicorn.error").error(f"GET /api/projects failed: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable.")
     out = []
     for doc in items:
-        # Ensure stack is current (in case files changed)
         try:
             ws = get_workspace(user["id"], doc["id"])
             doc["stack"] = detect_stack(ws) if ws.exists() else doc.get("stack", "")
@@ -128,6 +131,33 @@ async def list_files(project_id: str, path: str = Query(".", description="Relati
     doc = await proj_model.get_project(user["id"], project_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Project not found.")
+    if str(doc.get("workspace", "")).startswith("local:"):
+        try:
+            from app.api.bridge import forward_tool_to_bridge
+            res = await forward_tool_to_bridge(user["id"], project_id, "list_directory", {"path": path or "."}, timeout=10.0)
+            if not res.get("success"):
+                # If bridge offline, return offline status
+                if "offline" in res.get("output", "").lower() or "not connected" in res.get("output", "").lower():
+                    raise HTTPException(status_code=503, detail=res.get("output"))
+                raise HTTPException(status_code=500, detail=res.get("output"))
+            # Parse output: "# . (5 entries...)\nfile\n..."
+            lines = res.get("output", "").split("\n")[1:]
+            entries = []
+            for line in lines:
+                line=line.strip()
+                if not line or line.startswith("#") or line.startswith("…"):
+                    continue
+                if line.endswith("/"):
+                    name=line[:-1]
+                    entries.append({"name": name, "path": (Path(path or ".") / name).as_posix() if path not in (".", "") else name, "type": "dir"})
+                else:
+                    name=line.split("  ")[0]
+                    entries.append({"name": name, "path": (Path(path or ".") / name).as_posix() if path not in (".", "") else name, "type": "file", "size": 0})
+            return {"path": path or ".", "entries": entries, "projectId": project_id, "local": True}
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"Local bridge unavailable: {e}")
     ws = get_workspace(user["id"], project_id)
     rel = (path or ".").strip().replace("\\", "/").lstrip("/")
     if not rel or rel == ".":
@@ -141,13 +171,11 @@ async def list_files(project_id: str, path: str = Query(".", description="Relati
     if not target.exists():
         raise HTTPException(status_code=404, detail="Path not found.")
     if target.is_file():
-        # Return file info
         try:
             sz = target.stat().st_size
             return {"type": "file", "path": rel, "size": sz, "name": target.name}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
-    # Directory
     entries = []
     try:
         for p in sorted(target.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
@@ -173,6 +201,41 @@ async def get_tree(project_id: str, user: dict = Depends(get_current_user)):
     doc = await proj_model.get_project(user["id"], project_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Project not found.")
+    # For local projects, forward to bridge
+    if str(doc.get("workspace", "")).startswith("local:"):
+        try:
+            from app.api.bridge import forward_tool_to_bridge
+            res = await forward_tool_to_bridge(user["id"], project_id, "inspect_project", {}, timeout=10.0)
+            # For tree, we need to use list_directory or a dedicated tree tool
+            # For now, try to get file tree via bridge's list_directory
+            # We can call the bridge's file tree via a tool
+            # As a fallback, return a placeholder that indicates it's local and needs bridge
+            # We will try to use the bridge to list the directory
+            tree_res = await forward_tool_to_bridge(user["id"], project_id, "list_directory", {"path": "."}, timeout=10.0)
+            if tree_res.get("success"):
+                # Parse the output which is like "# . (5 entries...)\nfile1\nfile2"
+                # For now, return a simple tree based on that output
+                # We should have a proper tree tool, but for now, return empty and let frontend handle
+                # The frontend will show "Local project - connect bridge to see files"
+                # We can try to build a simple tree from the output
+                lines = tree_res.get("output", "").split("\n")[1:]  # Skip header
+                entries = []
+                for line in lines:
+                    line=line.strip()
+                    if not line or line.startswith("#") or line.startswith("…"):
+                        continue
+                    # line is like "src/" or "package.json  (123 bytes)"
+                    if line.endswith("/"):
+                        name=line[:-1]
+                        entries.append({"name": name, "path": name, "type": "dir", "children": []})
+                    else:
+                        name=line.split("  ")[0]
+                        entries.append({"name": name, "path": name, "type": "file", "size": 0})
+                return {"projectId": project_id, "tree": entries, "stack": doc.get("stack", "Local"), "local": True}
+            else:
+                return {"projectId": project_id, "tree": [], "stack": doc.get("stack", "Local"), "local": True, "offline": True, "message": tree_res.get("output", "Bridge offline")}
+        except Exception as e:
+            return {"projectId": project_id, "tree": [], "stack": doc.get("stack", "Local"), "local": True, "offline": True, "error": str(e)}
     ws = get_workspace(user["id"], project_id)
     tree = build_file_tree(ws, max_depth=3)
     return {"projectId": project_id, "tree": tree, "stack": detect_stack(ws)}
@@ -183,6 +246,26 @@ async def read_file(project_id: str, path: str = Query(..., description="Relativ
     doc = await proj_model.get_project(user["id"], project_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Project not found.")
+    if str(doc.get("workspace", "")).startswith("local:"):
+        try:
+            from app.api.bridge import forward_tool_to_bridge
+            res = await forward_tool_to_bridge(user["id"], project_id, "read_file", {"path": path, "offset": 1, "limit": 400}, timeout=15.0)
+            if not res.get("success"):
+                if "offline" in res.get("output", "").lower():
+                    raise HTTPException(status_code=503, detail=res.get("output"))
+                raise HTTPException(status_code=404 if "not found" in res.get("output", "").lower() else 500, detail=res.get("output"))
+            # Output is like "# path (lines...)\ncontent"
+            out = res.get("output", "")
+            # Strip header line
+            if "\n" in out:
+                content = out.split("\n", 1)[1]
+            else:
+                content = out
+            return {"path": path.strip().replace("\\", "/").lstrip("/"), "content": content[:20000], "size": len(content), "local": True}
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"Local bridge unavailable: {e}")
     ws = get_workspace(user["id"], project_id)
     rel = path.strip().replace("\\", "/").lstrip("/")
     if not rel:

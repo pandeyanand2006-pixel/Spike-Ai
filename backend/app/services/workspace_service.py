@@ -4,7 +4,7 @@ import re
 import shutil
 import zipfile
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from app.config import PROJECT_DIR
 
@@ -123,10 +123,17 @@ def health():
 }
 
 
+def is_local_workspace(workspace_str: str) -> bool:
+    return str(workspace_str or "").startswith("local:")
+
+def get_local_path(workspace_str: str) -> Optional[str]:
+    if is_local_workspace(workspace_str):
+        return str(workspace_str)[6:]
+    return None
+
 def get_workspace(user_id: str, project_id: str) -> Path:
-    """Resolve workspace path for a project (ensures directory exists)."""
+    """Resolve workspace path for a project (ensures directory exists). For local projects, still returns server mirror path."""
     p = (WORKSPACES_ROOT / str(user_id) / str(project_id)).resolve()
-    # Ensure within root
     try:
         p.relative_to(WORKSPACES_ROOT)
     except ValueError:

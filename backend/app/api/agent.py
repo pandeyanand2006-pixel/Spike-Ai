@@ -29,8 +29,20 @@ async def list_sessions(
     projectId: Optional[str] = Query(None, description="Filter by project"),
     user: dict = Depends(get_current_user),
 ):
-    items = await agent_store.list_agent_sessions(user["id"], project_id=projectId)
-    return items
+    try:
+        # Normalize: treat "null"/"undefined"/empty as no filter
+        if projectId in (None, "", "null", "undefined", "NaN"):
+            projectId = None
+        items = await agent_store.list_agent_sessions(user["id"], project_id=projectId)
+        return items
+    except Exception as e:
+        import logging, traceback
+        logging.getLogger("uvicorn.error").error(f"GET /api/agent/sessions failed: {e}\n{traceback.format_exc()}")
+        # Return empty array with 200 to avoid 502, or 503 if DB is down
+        # Check if it's a DB connection error
+        if "ServerSelectionTimeout" in str(type(e)) or "pymongo" in str(type(e)).lower():
+            raise HTTPException(status_code=503, detail="Database temporarily unavailable. Please retry.")
+        return []
 
 
 @router.get("/sessions/{session_id}")
@@ -134,7 +146,7 @@ async def agent_stream(req: AgentRequest, user: Optional[dict] = Depends(optiona
         changed: list[str] = []
         try:
             async for ev in stream_agent_loop(
-                user_message=req.message, mode=mode, model=req.model, history=history, workspace=workspace, project_info=project_info
+                user_message=req.message, mode=mode, model=req.model, history=history, workspace=workspace, project_info=project_info, user_id=uid if not is_guest else None, project_id=project_id
             ):
                 # persist tool events / changed files
                 if not is_guest and ev.get("type") in ("tool_start", "tool_result", "command_started", "command_result", "file_changed", "approval_required"):
