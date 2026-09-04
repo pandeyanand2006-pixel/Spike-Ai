@@ -2134,6 +2134,20 @@ const sidebarProjectStack = document.getElementById("sidebar-project-stack");
 let selectedProject = null;
 let selectedTemplate = "other";
 let projectsCache = [];
+function setAgentSessionId(sid) {
+  if (!sid) return;
+  agentSessionId = sid;
+  localStorage.setItem("spike_agent_session", sid);
+  if (selectedProject && selectedProject.id) {
+    try { localStorage.setItem("spike_agent_session_" + selectedProject.id, sid); } catch(e) {}
+  }
+}
+function getAgentSessionIdForProject(pid) {
+  if (pid) {
+    try { const v = localStorage.getItem("spike_agent_session_" + pid); if (v) return v; } catch(e) {}
+  }
+  return localStorage.getItem("spike_agent_session");
+}
 
 function getSelectedProjectId() { return localStorage.getItem("spike_project_id"); }
 function setSelectedProjectId(id) { if (id) localStorage.setItem("spike_project_id", id); else localStorage.removeItem("spike_project_id"); }
@@ -2229,12 +2243,58 @@ async function fetchSelectedProject() {
     selectedProject = p;
     updateProjectUI();
     await refreshExplorer();
+    await restoreLastAgentSession();
   } catch (e) {
     // stale id
     setSelectedProjectId(null);
     selectedProject = null;
     updateProjectUI();
   }
+}
+async function restoreLastAgentSession() {
+  // Try per-project session first, then global
+  let sid = null;
+  if (selectedProject) sid = localStorage.getItem("spike_agent_session_" + selectedProject.id);
+  if (!sid) sid = localStorage.getItem("spike_agent_session");
+  if (!sid || sid.startsWith("guest-")) return;
+  try {
+    const r = await fetch("/api/agent/sessions/" + sid, { headers: authHeaders() });
+    if (!r.ok) return;
+    const data = await r.json();
+    // Only restore if it belongs to current project (or no project filter)
+    if (selectedProject && data.projectId && data.projectId !== selectedProject.id) return;
+    if (!data.messages || !data.messages.length) return;
+    // Clear current and render
+    agentMessages.querySelectorAll(".agent-msg, .agent-tool, .agent-approval, .agent-file-change, .terminal-block").forEach(el => el.remove());
+    hideAgentEmpty();
+    if (agentEmpty) agentEmpty.style.display = "none";
+    data.messages.forEach(m => {
+      if (m.role === "user") {
+        appendAgentBubble("user", escapeHtml(m.content));
+      } else if (m.role === "assistant") {
+        const div = document.createElement("div");
+        div.className = "agent-msg assistant";
+        const lbl = document.createElement("div");
+        lbl.className = "agent-role";
+        lbl.textContent = "Spike Agent";
+        const bub = document.createElement("div");
+        bub.className = "agent-bubble";
+        bub.innerHTML = renderMarkdown(m.content);
+        div.appendChild(lbl);
+        div.appendChild(bub);
+        agentMessages.appendChild(div);
+      }
+    });
+    // Render tool events as history (file changes etc.)
+    (data.toolEvents || []).forEach(ev => {
+      if (ev.type === "file_changed" && ev.path) appendAgentFileChange(ev.path);
+    });
+    scrollAgentBottom();
+    // Also update todo to completed if session was completed
+    if (data.status === "completed" && todoItems.length && todoItems.some(t=>t.status!=="done")) {
+      completeAllTodos();
+    }
+  } catch (e) {}
 }
 async function refreshExplorer() {
   if (!selectedProject || !explorerTree) return;
