@@ -36,9 +36,20 @@ async def create_pairing_code(user_id: str) -> dict:
 
 
 async def verify_pairing_code(code: str, user_id: Optional[str] = None) -> Optional[dict]:
-    """Verify a pairing code, mark as used, return pairing doc."""
+    """Verify a pairing code, mark as used, return pairing doc.
+
+    When user_id is given, the code must belong to that user — codes
+    are single-user secrets, never cross-user.
+    """
     try:
-        doc = await get_db().bridge_pairings.find_one({"code": code.strip().upper(), "used": False})
+        q: dict = {"code": code.strip().upper(), "used": False}
+        if user_id is not None:
+            from app.models.project import _safe_oid
+            uid = _safe_oid(user_id)
+            if uid is None:
+                return None
+            q["userId"] = uid
+        doc = await get_db().bridge_pairings.find_one(q)
     except Exception:
         return None
     if not doc:
@@ -50,8 +61,6 @@ async def verify_pairing_code(code: str, user_id: Optional[str] = None) -> Optio
             return None
     except Exception:
         pass
-    # If user_id provided, check it matches or update
-    # For now, allow any user to claim code, but store userId
     await get_db().bridge_pairings.update_one({"_id": doc["_id"]}, {"$set": {"used": True}})
     return doc
 

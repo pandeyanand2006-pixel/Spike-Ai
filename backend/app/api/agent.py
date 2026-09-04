@@ -11,7 +11,6 @@ from app.models import agent_session as agent_store
 from app.models import project as project_model
 from app.schemas.agent import AgentRequest
 from app.services.agent_service import stream_agent_loop
-from app.services.agent_tools import WORKSPACE as DEFAULT_WORKSPACE
 from app.services.workspace_service import get_workspace as get_project_workspace
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
@@ -29,19 +28,29 @@ async def list_sessions(
     projectId: Optional[str] = Query(None, description="Filter by project"),
     user: dict = Depends(get_current_user),
 ):
+    import asyncio
     try:
         # Normalize: treat "null"/"undefined"/empty as no filter
         if projectId in (None, "", "null", "undefined", "NaN"):
             projectId = None
-        items = await agent_store.list_agent_sessions(user["id"], project_id=projectId)
+        # Bound the DB call: a hanging Mongo must never hold the request
+        # open long enough for the Render proxy to return 502.
+        items = await asyncio.wait_for(
+            agent_store.list_agent_sessions(user["id"], project_id=projectId),
+            timeout=8.0,
+        )
         return items
+    except asyncio.TimeoutError:
+        import logging
+        logging.getLogger("uvicorn.error").error("GET /api/agent/sessions timed out (DB slow)")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable. Please retry.")
+    except HTTPException:
+        raise
     except Exception as e:
         import logging, traceback
         logging.getLogger("uvicorn.error").error(f"GET /api/agent/sessions failed: {e}\n{traceback.format_exc()}")
-        # Return empty array with 200 to avoid 502, or 503 if DB is down
-        # Check if it's a DB connection error
-        if "ServerSelectionTimeout" in str(type(e)) or "pymongo" in str(type(e)).lower():
-            raise HTTPException(status_code=503, detail="Database temporarily unavailable. Please retry.")
+        # Never 502: no sessions or a DB hiccup returns [] so the UI
+        # can render "No agent sessions yet" instead of failing.
         return []
 
 
@@ -69,6 +78,21 @@ async def delete_session(session_id: str, user: dict = Depends(get_current_user)
     if not ok:
         raise HTTPException(status_code=404, detail="Agent session not found.")
     return {"status": "deleted"}
+
+
+@router.post("/sessions/{session_id}/stop")
+async def stop_session(session_id: str, user: dict = Depends(get_current_user)):
+    """Mark a running session as stopped (browser Stop button).
+
+    Note: the NDJSON stream is client-driven; aborting the fetch stops
+    new tokens, and this endpoint persists the stopped state so a
+    reconnect shows the true status and Continue can resume.
+    """
+    doc = await agent_store.get_agent_session(user["id"], session_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Agent session not found.")
+    await agent_store.update_agent_status(user["id"], session_id, "stopped")
+    return {"status": "stopped", "sessionId": session_id}
 
 
 @router.post("/stream")
@@ -105,9 +129,13 @@ async def agent_stream(req: AgentRequest, user: Optional[dict] = Depends(optiona
         except Exception:
             workspace = None
     else:
-        # No project — fall back to default repo workspace (backwards compat)
-        workspace = DEFAULT_WORKSPACE
-        project_info = None
+        # No project selected: refuse to run against any implicit
+        # workspace. The agent must NEVER fall back to the Spike backend
+        # repo directory — that was the "wrong workspace" bug.
+        raise HTTPException(
+            status_code=400,
+            detail="No project selected. Select a project to start working.",
+        )
 
     # Resolve or create session (now project-scoped)
     session_id = req.sessionId

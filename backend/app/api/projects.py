@@ -69,6 +69,14 @@ async def list_projects(search: Optional[str] = Query(None), user: dict = Depend
         raise HTTPException(status_code=503, detail="Database temporarily unavailable.")
     out = []
     for doc in items:
+        if str(doc.get("workspace", "")).startswith("local:"):
+            # Local projects live on the user's PC; the server mirror dir
+            # says nothing about their stack. Never overwrite with "Empty".
+            doc["stack"] = doc.get("stack") or "Local"
+            d = _to_out(doc)
+            d["local"] = True
+            out.append(d)
+            continue
         try:
             ws = get_workspace(user["id"], doc["id"])
             doc["stack"] = detect_stack(ws) if ws.exists() else doc.get("stack", "")
@@ -84,6 +92,11 @@ async def get_project(project_id: str, user: dict = Depends(get_current_user)):
     if not doc:
         raise HTTPException(status_code=404, detail="Project not found.")
     await proj_model.touch_project(user["id"], project_id)
+    if str(doc.get("workspace", "")).startswith("local:"):
+        doc["stack"] = doc.get("stack") or "Local"
+        d = _to_out(doc)
+        d["local"] = True
+        return d
     # Ensure workspace exists
     ws = get_workspace(user["id"], project_id)
     ws.mkdir(parents=True, exist_ok=True)
@@ -113,17 +126,23 @@ async def delete_project(project_id: str, user: dict = Depends(get_current_user)
     doc = await proj_model.get_project(user["id"], project_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Project not found.")
-    # Remove workspace directory
-    ws = get_workspace(user["id"], project_id)
-    try:
-        if ws.exists():
-            shutil.rmtree(ws, ignore_errors=True)
-    except Exception:
+    is_local = str(doc.get("workspace", "")).startswith("local:")
+    if is_local:
+        # Local projects: remove ONLY the Spike registration.
+        # The actual folder on the user's PC must remain untouched.
         pass
+    else:
+        # Cloud workspace: remove the server-side workspace directory.
+        ws = get_workspace(user["id"], project_id)
+        try:
+            if ws.exists():
+                shutil.rmtree(ws, ignore_errors=True)
+        except Exception:
+            pass
     ok = await proj_model.delete_project(user["id"], project_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Project not found.")
-    return {"status": "deleted"}
+    return {"status": "deleted", "local": is_local}
 
 
 @router.get("/{project_id}/files")
@@ -284,6 +303,78 @@ async def read_file(project_id: str, path: str = Query(..., description="Relativ
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {"path": rel, "content": text[:20000], "size": target.stat().st_size}
+
+
+@router.get("/{project_id}/git/status")
+async def git_status(project_id: str, user: dict = Depends(get_current_user)):
+    """Real git status for the project (branch + modified files). Read-only."""
+    import subprocess
+    doc = await proj_model.get_project(user["id"], project_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    if str(doc.get("workspace", "")).startswith("local:"):
+        try:
+            from app.api.bridge import forward_tool_to_bridge
+            res = await forward_tool_to_bridge(
+                user["id"], project_id, "run_command",
+                {"command": "git status --short --branch && echo --- && git log --oneline -5", "workdir": ".", "timeout": 15},
+                timeout=20.0,
+            )
+            if not res.get("success") and "offline" in res.get("output", "").lower():
+                raise HTTPException(status_code=503, detail=res.get("output"))
+            return {"projectId": project_id, "local": True, "output": res.get("output", ""), "success": res.get("success", False)}
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"Local bridge unavailable: {e}")
+    ws = get_workspace(user["id"], project_id)
+    if not (ws / ".git").exists():
+        return {"projectId": project_id, "local": False, "repo": False, "branch": None, "output": "Not a git repository."}
+    try:
+        branch = subprocess.run(["git", "branch", "--show-current"], cwd=str(ws), capture_output=True, text=True, timeout=10)
+        st = subprocess.run(["git", "status", "--short", "--branch"], cwd=str(ws), capture_output=True, text=True, timeout=10)
+        out = (st.stdout or st.stderr or "").strip()
+        return {"projectId": project_id, "local": False, "repo": True, "branch": (branch.stdout or "").strip() or None, "output": out or "(clean)"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"git status failed: {e}")
+
+
+@router.get("/{project_id}/git/diff")
+async def git_diff(project_id: str, path: str = Query("", description="Optional single file to diff"), user: dict = Depends(get_current_user)):
+    """Real git diff (never fabricated). Read-only."""
+    import subprocess
+    doc = await proj_model.get_project(user["id"], project_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    rel = (path or "").strip().replace("\\", "/").lstrip("/")
+    if ".." in rel.split("/"):
+        raise HTTPException(status_code=400, detail="Invalid path.")
+    if str(doc.get("workspace", "")).startswith("local:"):
+        try:
+            from app.api.bridge import forward_tool_to_bridge
+            cmd = "git diff -- " + rel if rel else "git diff --stat && echo === && git diff | head -c 12000"
+            res = await forward_tool_to_bridge(
+                user["id"], project_id, "run_command",
+                {"command": cmd, "workdir": ".", "timeout": 15},
+                timeout=20.0,
+            )
+            if not res.get("success") and "offline" in res.get("output", "").lower():
+                raise HTTPException(status_code=503, detail=res.get("output"))
+            return {"projectId": project_id, "local": True, "output": res.get("output", ""), "success": res.get("success", False)}
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"Local bridge unavailable: {e}")
+    ws = get_workspace(user["id"], project_id)
+    if not (ws / ".git").exists():
+        raise HTTPException(status_code=404, detail="Not a git repository.")
+    try:
+        args = ["git", "diff", "--", rel] if rel else ["git", "diff"]
+        proc = subprocess.run(args, cwd=str(ws), capture_output=True, text=True, timeout=10)
+        out = (proc.stdout or "")[:12000] or "(no changes)"
+        return {"projectId": project_id, "local": False, "output": out}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"git diff failed: {e}")
 
 
 @router.post("/{project_id}/import")

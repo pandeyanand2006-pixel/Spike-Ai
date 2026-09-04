@@ -2602,3 +2602,556 @@ if (chatListEl) chatListEl.addEventListener("click", (e)=>{
 
 setAgentMode(agentMode);
 init();
+
+/* ============================================================
+   Spike Agent Phase 2 — Local Bridge, project menus, git/changes,
+   composer chip, watcher polling, session/project error handling.
+   (Appended; overrides renderProjectList/loadAgentSessions with
+   improved versions. Normal chat code above is untouched.)
+   ============================================================ */
+(function spikeAgentLocal() {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const bridgeStatusEl = $("bridge-status");
+  const bridgeStatusText = $("bridge-status-text");
+  const composerProject = $("composer-project");
+  const composerGit = $("composer-git");
+  const composerBridge = $("composer-bridge");
+  const composerAdd = $("composer-add");
+  const composerModel = $("composer-model");
+  let bridgeOnline = false;
+  let lastTreeSig = "";
+
+  function isLocalProject(p) {
+    return !!(p && (p.local || (p.workspace || "").indexOf("local:") === 0));
+  }
+
+  /* ---------- Bridge status ---------- */
+  async function refreshBridgeStatus() {
+    try {
+      const res = await fetch("/api/bridge/status", { headers: authHeaders() });
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      bridgeOnline = !!data.online;
+      const n = (data.devices || []).length;
+      if (bridgeStatusEl) {
+        bridgeStatusEl.classList.toggle("online", bridgeOnline);
+        if (bridgeStatusText) bridgeStatusText.textContent = bridgeOnline
+          ? ("● Connected — " + (data.connections || 1) + " bridge session" + ((data.connections || 1) > 1 ? "s" : "") + " (" + n + " device" + (n === 1 ? "" : "s") + ")")
+          : (n ? "○ Offline — " + n + " paired device" + (n === 1 ? "" : "s") + ", bridge not running" : "○ Offline — no local bridge paired");
+      }
+      if (composerBridge) {
+        composerBridge.textContent = bridgeOnline ? "● Connected" : "○ Offline";
+        composerBridge.classList.toggle("online", bridgeOnline);
+        composerBridge.classList.toggle("offline", !bridgeOnline);
+      }
+      return data;
+    } catch (e) {
+      if (bridgeStatusText) bridgeStatusText.textContent = "○ Offline — sign in to check";
+      if (composerBridge) { composerBridge.textContent = "○ Offline"; composerBridge.classList.add("offline"); }
+      return null;
+    }
+  }
+
+  /* ---------- Confirm modal ---------- */
+  let confirmCb = null;
+  function openConfirm(title, message, okLabel, cb) {
+    $("confirm-title").textContent = title;
+    $("confirm-message").textContent = message;
+    $("confirm-ok").textContent = okLabel || "Remove";
+    confirmCb = cb;
+    $("confirm-modal").hidden = false;
+  }
+  function closeConfirm() { $("confirm-modal").hidden = true; confirmCb = null; }
+  if ($("confirm-close")) $("confirm-close").addEventListener("click", closeConfirm);
+  if ($("confirm-cancel")) $("confirm-cancel").addEventListener("click", closeConfirm);
+  if ($("confirm-backdrop")) $("confirm-backdrop").addEventListener("click", closeConfirm);
+  if ($("confirm-ok")) $("confirm-ok").addEventListener("click", () => { const cb = confirmCb; closeConfirm(); if (cb) cb(); });
+
+  /* ---------- Pairing modal ---------- */
+  function openPairing() {
+    $("pairing-modal").hidden = false;
+    $("pairing-error").hidden = true;
+    loadDevices();
+  }
+  function closePairing() { $("pairing-modal").hidden = true; }
+  if ($("connect-bridge-btn")) $("connect-bridge-btn").addEventListener("click", openPairing);
+  if ($("pairing-close")) $("pairing-close").addEventListener("click", closePairing);
+  if ($("pairing-backdrop")) $("pairing-backdrop").addEventListener("click", closePairing);
+  if (composerBridge) composerBridge.addEventListener("click", openPairing);
+  async function loadDevices() {
+    const box = $("pairing-devices");
+    if (!box) return;
+    box.innerHTML = '<div style="font-size:12.5px;color:var(--text-2)">Loading devices…</div>';
+    try {
+      const res = await fetch("/api/bridge/devices", { headers: authHeaders() });
+      if (res.status === 401) { box.innerHTML = '<div style="font-size:12.5px">Sign in to pair a bridge.</div>'; return; }
+      if (!res.ok) throw new Error("Failed to load devices");
+      const devs = await res.json();
+      if (!devs.length) { box.innerHTML = '<div style="font-size:12.5px;color:var(--text-2)">No devices paired yet.</div>'; return; }
+      box.innerHTML = "";
+      devs.forEach((d) => {
+        const row = document.createElement("div");
+        row.className = "pairing-device";
+        row.innerHTML = '<span class="dev-dot">' + (bridgeOnline ? "●" : "○") + '</span><span style="flex:1">' + escapeHtml(d.name || "Device") + '</span>';
+        const del = document.createElement("button");
+        del.className = "session-del"; del.textContent = "Disconnect"; del.title = "Revoke this device";
+        del.addEventListener("click", async () => {
+          try {
+            const r = await fetch("/api/bridge/devices/" + d.id, { method: "DELETE", headers: authHeaders() });
+            if (!r.ok) throw new Error("Failed");
+            toast("Device disconnected");
+            loadDevices(); refreshBridgeStatus();
+          } catch (e) { toast(e.message); }
+        });
+        row.appendChild(del);
+        box.appendChild(row);
+      });
+    } catch (e) { box.innerHTML = '<div style="font-size:12.5px;color:#b91c1c">' + escapeHtml(e.message) + "</div>"; }
+  }
+  if ($("pairing-generate")) $("pairing-generate").addEventListener("click", async () => {
+    const err = $("pairing-error");
+    try {
+      const res = await fetch("/api/bridge/pairing", { method: "POST", headers: authHeaders() });
+      if (res.status === 401) throw new Error("Sign in to pair a bridge.");
+      if (!res.ok) throw new Error("Could not create pairing code");
+      const data = await res.json();
+      $("pairing-code").textContent = data.code || "····";
+      if (err) err.hidden = true;
+    } catch (e) {
+      if (err) { err.textContent = e.message; err.hidden = false; }
+    }
+  });
+
+  /* ---------- Add Local Project ---------- */
+  function openLocalModal() {
+    closeProjectSelector();
+    const m = $("local-project-modal");
+    if (m) { m.hidden = false; $("lp-error").hidden = true; setTimeout(() => $("lp-path") && $("lp-path").focus(), 80); }
+  }
+  function closeLocalModal() { const m = $("local-project-modal"); if (m) m.hidden = true; }
+  if ($("add-local-project-btn")) $("add-local-project-btn").addEventListener("click", openLocalModal);
+  if ($("local-project-close")) $("local-project-close").addEventListener("click", closeLocalModal);
+  if ($("local-project-backdrop")) $("local-project-backdrop").addEventListener("click", closeLocalModal);
+  if ($("local-cancel")) $("local-cancel").addEventListener("click", closeLocalModal);
+  if ($("local-project-form")) $("local-project-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const err = $("lp-error");
+    let name = $("lp-name").value.trim();
+    const localPath = $("lp-path").value.trim();
+    if (!localPath) { err.textContent = "Enter the local folder path."; err.hidden = false; return; }
+    if (!name) {
+      const parts = localPath.replace(/\\/g, "/").split("/").filter(Boolean);
+      name = parts[parts.length - 1] || "Local Project";
+    }
+    const btn = $("local-submit");
+    if (btn) btn.disabled = true;
+    try {
+      const res = await fetch("/api/bridge/workspaces", {
+        method: "POST", headers: authHeaders(), body: JSON.stringify({ localPath, name }),
+      });
+      if (res.status === 401) { toast("Sign in to add projects"); showAuthScreen(true); return; }
+      if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.detail || "Could not register project"); }
+      const data = await res.json();
+      closeLocalModal();
+      const fresh = await fetch("/api/projects/" + data.projectId, { headers: authHeaders() }).then((r) => r.json()).catch(() => null);
+      if (fresh && fresh.id) await selectProject(fresh);
+      else await selectProject({ id: data.projectId, name, stack: "Local" });
+      loadProjects();
+      if (!bridgeOnline) toast("Registered. Start the bridge on your PC to connect.");
+    } catch (ex) { err.textContent = ex.message; err.hidden = false; }
+    finally { if (btn) btn.disabled = false; }
+  });
+
+  /* ---------- Project list: local badges + context menu + retry ---------- */
+  const _origLoadProjects = loadProjects;
+  loadProjects = async function (search) {
+    search = search || "";
+    if (!projectListEl) return;
+    projectListEl.innerHTML = '<div style="padding:12px;color:var(--text-2);font-size:13px">Loading…</div>';
+    try {
+      const url = "/api/projects" + (search ? "?search=" + encodeURIComponent(search) : "");
+      const res = await fetch(url, { headers: authHeaders() });
+      if (res.status === 401) {
+        projectListEl.innerHTML = '<div style="padding:12px;color:var(--text-2);font-size:13px">Sign in to manage projects.</div>';
+        return;
+      }
+      if (res.status === 503) throw new Error("Database temporarily unavailable.");
+      if (!res.ok) throw new Error("Failed to load projects");
+      const items = await res.json();
+      projectsCache = items;
+      renderProjectList(items);
+    } catch (e) {
+      projectListEl.innerHTML = '<div style="padding:12px;color:#b91c1c;font-size:13px">Unable to load projects: ' + escapeHtml(e.message) + '</div>';
+      const retry = document.createElement("button");
+      retry.className = "create-project-open"; retry.textContent = "Retry";
+      retry.addEventListener("click", () => loadProjects(projectSearch ? projectSearch.value.trim() : ""));
+      projectListEl.appendChild(retry);
+    }
+    refreshBridgeStatus();
+  };
+
+  const _origRenderProjectList = renderProjectList;
+  renderProjectList = function (items) {
+    if (!projectListEl) return;
+    if (!items.length) {
+      projectListEl.innerHTML = '<div style="padding:12px;color:var(--text-2);font-size:13px">No projects yet. Create one or add a local folder to start.</div>';
+      return;
+    }
+    projectListEl.innerHTML = "";
+    const recent = document.createElement("div");
+    recent.className = "sidebar-section-title";
+    recent.style.cssText = "font-size:11px;color:var(--muted);padding:2px 4px 6px";
+    recent.textContent = "Recent Projects";
+    projectListEl.appendChild(recent);
+    items.forEach((p) => {
+      const wrap = document.createElement("div");
+      wrap.className = "project-item-wrap";
+      wrap.style.position = "relative";
+      const el = document.createElement("button");
+      el.className = "project-item" + (selectedProject && selectedProject.id === p.id ? " active" : "");
+      const initial = (p.name || "P").trim().charAt(0).toUpperCase();
+      const bg = projectAvatarColor(p.name || "P");
+      const time = p.lastOpenedAt ? new Date(p.lastOpenedAt).toLocaleDateString() : "";
+      const isActive = selectedProject && selectedProject.id === p.id;
+      const local = isLocalProject(p);
+      const badge = local ? (bridgeOnline ? " ● Connected" : " ○ Offline") : "";
+      el.innerHTML = '<span class="project-item-avatar" style="background:' + bg + '">' + escapeHtml(initial) + '</span>' +
+        '<span class="project-item-info"><span class="project-item-name">📁 ' + escapeHtml(p.name) + "</span>" +
+        '<span class="project-item-meta">' + escapeHtml(p.stack || p.template || "") + escapeHtml(badge) + "</span></span>" +
+        '<span class="project-item-time">' + escapeHtml(time) + "</span>" + (isActive ? '<span class="project-item-check">✓</span>' : "");
+      el.addEventListener("click", () => selectProject(p));
+      const menuBtn = document.createElement("button");
+      menuBtn.className = "project-menu-btn"; menuBtn.textContent = "⋮"; menuBtn.title = "Project options";
+      menuBtn.addEventListener("click", (ev) => { ev.stopPropagation(); openProjectMenu(wrap, menuBtn, p, local); });
+      wrap.appendChild(el); wrap.appendChild(menuBtn);
+      projectListEl.appendChild(wrap);
+    });
+  };
+
+  function closeProjectMenu() {
+    document.querySelectorAll(".project-menu").forEach((m) => m.remove());
+  }
+  document.addEventListener("click", closeProjectMenu);
+  function openProjectMenu(wrap, anchor, p, local) {
+    closeProjectMenu();
+    const menu = document.createElement("div");
+    menu.className = "project-menu";
+    const opts = [
+      ["Open", () => selectProject(p)],
+      [selectedProject && selectedProject.id === p.id ? "✓ Active" : "Set as active", () => selectProject(p)],
+      ["Rename", () => renameProject(p)],
+      ["Remove from Spike", () => confirmRemoveProject(p, local)],
+    ];
+    opts.forEach(([label, fn]) => {
+      const b = document.createElement("button");
+      b.textContent = label;
+      if (label.indexOf("Remove") === 0) b.className = "danger";
+      b.addEventListener("click", (e) => { e.stopPropagation(); closeProjectMenu(); fn(); });
+      menu.appendChild(b);
+    });
+    const r = anchor.getBoundingClientRect();
+    menu.style.position = "fixed";
+    menu.style.top = Math.min(window.innerHeight - 190, r.bottom + 4) + "px";
+    menu.style.left = Math.max(8, r.left - 140) + "px";
+    document.body.appendChild(menu);
+  }
+  async function renameProject(p) {
+    const name = prompt("Rename project", p.name || "");
+    if (!name || !name.trim() || name.trim() === p.name) return;
+    try {
+      const res = await fetch("/api/projects/" + p.id, { method: "PATCH", headers: authHeaders(), body: JSON.stringify({ name: name.trim() }) });
+      if (!res.ok) throw new Error("Rename failed");
+      const fresh = await res.json();
+      if (selectedProject && selectedProject.id === p.id) { selectedProject = fresh; updateProjectUI(); }
+      loadProjects(projectSearch ? projectSearch.value.trim() : "");
+      toast("Renamed to " + fresh.name);
+    } catch (e) { toast(e.message); }
+  }
+  function confirmRemoveProject(p, local) {
+    const msg = local
+      ? 'This will remove "' + p.name + '" from Spike AI. Your local files will NOT be deleted.'
+      : 'This will remove "' + p.name + '" from Spike AI and delete its cloud workspace files.';
+    openConfirm("Remove project?", msg, "Remove", async () => {
+      try {
+        const res = await fetch("/api/projects/" + p.id, { method: "DELETE", headers: authHeaders() });
+        if (!res.ok) throw new Error("Remove failed");
+        if (selectedProject && selectedProject.id === p.id) {
+          selectedProject = null;
+          try { localStorage.removeItem("spike_project_id"); } catch (e) {}
+          updateProjectUI();
+          if (explorerTree) explorerTree.innerHTML = "";
+        }
+        loadProjects(projectSearch ? projectSearch.value.trim() : "");
+        toast("Project removed" + (local ? " (local files kept)" : ""));
+      } catch (e) { toast(e.message); }
+    });
+  }
+
+  /* ---------- Agent sessions: error state + delete ---------- */
+  const _origLoadAgentSessions = loadAgentSessions;
+  loadAgentSessions = async function () {
+    if (!agentList) return;
+    try {
+      const pid = selectedProject ? selectedProject.id : null;
+      const url = "/api/agent/sessions" + (pid ? "?projectId=" + encodeURIComponent(pid) : "");
+      const res = await fetch(url, { headers: authHeaders() });
+      if (!res.ok) {
+        if (res.status === 503) throw new Error("Database temporarily unavailable.");
+        return;
+      }
+      const items = await res.json();
+      agentList.innerHTML = "";
+      const title = agentSessionsWrap ? agentSessionsWrap.querySelector(".sidebar-section-title") : null;
+      if (!items.length) {
+        if (agentSessionsWrap) {
+          agentSessionsWrap.hidden = false;
+          if (title) title.textContent = "Agent sessions";
+          let empty = agentList.querySelector(".agent-sessions-empty");
+          if (!empty) {
+            empty = document.createElement("div");
+            empty.className = "agent-sessions-empty";
+            empty.style.cssText = "padding:6px 10px;color:var(--text-2);font-size:12px";
+            empty.textContent = "No agent sessions yet";
+            agentList.appendChild(empty);
+          }
+        }
+        return;
+      }
+      if (agentSessionsWrap) agentSessionsWrap.hidden = false;
+      items.slice(0, 20).forEach((s) => {
+        const el = document.createElement("div");
+        el.className = "chat-item" + (s.id === agentSessionId ? " active" : "");
+        el.style.display = "flex"; el.style.alignItems = "center";
+        const nm = document.createElement("span");
+        nm.className = "chat-name"; nm.style.flex = "1";
+        nm.textContent = s.title || "Agent Session";
+        nm.addEventListener("click", async () => {
+          agentSessionId = s.id;
+          localStorage.setItem("spike_agent_session", agentSessionId);
+          showAgentView();
+          try {
+            const r = await fetch("/api/agent/sessions/" + s.id, { headers: authHeaders() });
+            if (!r.ok) return;
+            const d = await r.json();
+            agentMessages.querySelectorAll(".agent-msg, .agent-tool, .agent-approval, .agent-file-change, .terminal-block").forEach((x) => x.remove());
+            if (agentEmpty) agentEmpty.style.display = "";
+            (d.messages || []).forEach((m) => {
+              if (m.role === "user") appendAgentBubble("user", escapeHtml(m.content));
+              else if (m.role === "assistant") {
+                const div = document.createElement("div"); div.className = "agent-msg assistant";
+                const lbl = document.createElement("div"); lbl.className = "agent-role"; lbl.textContent = "Spike Agent";
+                const bub = document.createElement("div"); bub.className = "agent-bubble";
+                bub.innerHTML = renderMarkdown(m.content);
+                div.appendChild(lbl); div.appendChild(bub); agentMessages.appendChild(div);
+              }
+            });
+            (d.toolEvents || []).forEach((ev) => {
+              if (ev.type === "tool_start") appendAgentTool(ev.tool, ev.input, "running");
+            });
+            hideAgentEmpty();
+          } catch (e) {}
+        });
+        const del = document.createElement("button");
+        del.className = "session-del"; del.textContent = "×"; del.title = "Delete session";
+        del.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          try {
+            const r = await fetch("/api/agent/sessions/" + s.id, { method: "DELETE", headers: authHeaders() });
+            if (!r.ok) throw new Error("Delete failed");
+            if (agentSessionId === s.id) { agentSessionId = null; localStorage.removeItem("spike_agent_session"); }
+            loadAgentSessions();
+            toast("Session deleted");
+          } catch (ex) { toast(ex.message); }
+        });
+        el.appendChild(nm); el.appendChild(del);
+        agentList.appendChild(el);
+      });
+    } catch (e) {
+      if (agentList && !agentList.children.length) {
+        agentList.innerHTML = '<div style="padding:6px 10px;color:#b91c1c;font-size:12px">Unable to load Agent sessions.</div>';
+        const retry = document.createElement("button");
+        retry.className = "create-project-open"; retry.style.margin = "4px 10px"; retry.textContent = "Retry";
+        retry.addEventListener("click", loadAgentSessions);
+        agentList.appendChild(retry);
+        if (agentSessionsWrap) agentSessionsWrap.hidden = false;
+      }
+    }
+  };
+
+  /* ---------- Stop must persist server-side ---------- */
+  if ($("agent-stop")) $("agent-stop").addEventListener("click", async () => {
+    try {
+      if (agentSessionId && !String(agentSessionId).startsWith("guest-")) {
+        await fetch("/api/agent/sessions/" + agentSessionId + "/stop", { method: "POST", headers: authHeaders() }).catch(() => {});
+      }
+    } catch (e) {}
+  });
+
+  /* ---------- Explorer tabs + Changes/Diff ---------- */
+  const tabFiles = $("tab-files"), tabChanges = $("tab-changes"), changesPanel = $("changes-panel");
+  function showTab(which) {
+    if (tabFiles) tabFiles.classList.toggle("active", which === "files");
+    if (tabChanges) tabChanges.classList.toggle("active", which === "changes");
+    if (explorerTree) explorerTree.style.display = which === "files" ? "" : "none";
+    if (changesPanel) changesPanel.hidden = which !== "changes";
+    if (which === "changes") loadChanges();
+  }
+  if (tabFiles) tabFiles.addEventListener("click", () => showTab("files"));
+  if (tabChanges) tabChanges.addEventListener("click", () => showTab("changes"));
+  if ($("git-refresh")) $("git-refresh").addEventListener("click", () => { loadGitStatus(); if (changesPanel && !changesPanel.hidden) loadChanges(); });
+
+  async function loadGitStatus() {
+    if (!selectedProject || !composerGit) return;
+    try {
+      const res = await fetch("/api/projects/" + selectedProject.id + "/git/status", { headers: authHeaders() });
+      if (!res.ok) {
+        composerGit.textContent = isLocalProject(selectedProject) && !bridgeOnline ? "○ Offline" : "No Git";
+        return;
+      }
+      const data = await res.json();
+      if (data.repo === false) { composerGit.textContent = "No Git"; return; }
+      const lines = (data.output || "").split("\n");
+      let branch = data.branch || null;
+      for (const ln of lines) {
+        const m = ln.trim().match(/^##\s*(\S+)/);
+        if (m) { branch = m[1].replace(/\.\.\..*$/, ""); break; }
+      }
+      composerGit.textContent = "⎇ " + (branch || "main");
+      composerGit.title = (data.output || "").slice(0, 500);
+    } catch (e) { composerGit.textContent = "No Git"; }
+  }
+
+  async function loadChanges() {
+    if (!selectedProject || !changesPanel) return;
+    changesPanel.innerHTML = '<div style="color:var(--text-2);font-size:12px">Loading changes…</div>';
+    try {
+      const res = await fetch("/api/projects/" + selectedProject.id + "/git/status", { headers: authHeaders() });
+      if (!res.ok) throw new Error(res.status === 503 ? "Local bridge offline" : "Git unavailable");
+      const data = await res.json();
+      // Local bridge output is a run_command transcript: cut the git-log tail
+      // at the "---" separator and drop shell headers.
+      let raw = data.output || "";
+      const sep = raw.indexOf("\n---");
+      if (sep !== -1) raw = raw.slice(0, sep);
+      const lines = raw.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("##") && !l.startsWith("$") && !l.startsWith("(exit") && l !== "(clean)" && l !== "(no output)" && l !== "Not a git repository.");
+      if (!lines.length) { changesPanel.innerHTML = '<div style="color:var(--text-2);font-size:12px">No changes — working tree clean.</div>'; return; }
+      changesPanel.innerHTML = "";
+      lines.slice(0, 60).forEach((ln) => {
+        const code = ln.slice(0, 2).trim() || "M";
+        const fp = ln.slice(3).trim();
+        const row = document.createElement("div");
+        row.className = "change-row";
+        row.innerHTML = '<span class="chg ' + escapeHtml(code[0] || "M") + '">' + escapeHtml(code[0] || "M") + '</span><span>' + escapeHtml(fp) + "</span>";
+        row.addEventListener("click", async () => {
+          row.style.opacity = "0.6";
+          try {
+            const r = await fetch("/api/projects/" + selectedProject.id + "/git/diff?path=" + encodeURIComponent(fp), { headers: authHeaders() });
+            const d = await r.json().catch(() => ({}));
+            const old = row.nextElementSibling;
+            if (old && old.classList && old.classList.contains("diff-block")) { old.remove(); row.style.opacity = ""; return; }
+            const dv = document.createElement("div");
+            dv.className = "diff-block";
+            dv.textContent = (d.output || "(no diff)").slice(0, 12000);
+            row.after(dv);
+          } catch (e) { toast("Diff unavailable"); }
+          row.style.opacity = "";
+        });
+        changesPanel.appendChild(row);
+      });
+    } catch (e) {
+      changesPanel.innerHTML = '<div style="color:#b91c1c;font-size:12px">' + escapeHtml(e.message) + "</div>";
+    }
+  }
+
+  /* ---------- Composer chip + project UI extension ---------- */
+  if (composerProject) composerProject.addEventListener("click", openProjectSelector);
+  if (composerAdd) composerAdd.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (addPopover) addPopover.hidden = !addPopover.hidden;
+  });
+  if (composerModel && composerModel.textContent.trim() === "Spike Model") {
+    try {
+      const m = localStorage.getItem("spike_model");
+      if (m) composerModel.textContent = m;
+    } catch (e) {}
+  }
+  const _origUpdateProjectUI = updateProjectUI;
+  updateProjectUI = function () {
+    _origUpdateProjectUI.apply(this, arguments);
+    if (composerProject) {
+      composerProject.textContent = selectedProject ? ("📁 " + selectedProject.name + "  ▾") : "📁 Select project  ▾";
+    }
+    if (composerGit) {
+      if (!selectedProject) composerGit.textContent = "No Git";
+      else loadGitStatus();
+    }
+    if (selectedProject) refreshBridgeStatus();
+  };
+
+  const _origSelectProject = selectProject;
+  selectProject = async function (p) {
+    // Per-project session restore before switching UI
+    try {
+      const v = localStorage.getItem("spike_agent_session_" + p.id);
+      if (v) { agentSessionId = v; localStorage.setItem("spike_agent_session", v); }
+    } catch (e) {}
+    await _origSelectProject.apply(this, arguments);
+    lastTreeSig = "";
+    loadGitStatus();
+    refreshBridgeStatus();
+  };
+
+  /* ---------- Live watcher polling (external VS Code changes) ---------- */
+  async function silentTreeSignature() {
+    if (!selectedProject) return null;
+    try {
+      const res = await fetch("/api/projects/" + selectedProject.id + "/tree", { headers: authHeaders() });
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (data.offline) return "offline";
+      return JSON.stringify(data.tree);
+    } catch (e) { return null; }
+  }
+  setInterval(async () => {
+    try {
+      if (!selectedProject) return;
+      if ($("agent-view") && $("agent-view").hidden) return;
+      if (document.hidden) return;
+      const sig = await silentTreeSignature();
+      if (sig === null) return;
+      if (sig === "offline") {
+        if (bridgeOnline) { refreshBridgeStatus(); }
+        return;
+      }
+      if (lastTreeSig && sig !== lastTreeSig) {
+        await refreshExplorer();
+        toast("Project files changed (external edit detected)");
+      }
+      lastTreeSig = sig;
+    } catch (e) {}
+  }, 8000);
+
+  /* ---------- Empty-state clarity ---------- */
+  const _origRefreshExplorer = refreshExplorer;
+  refreshExplorer = async function () {
+    if (!selectedProject || !explorerTree) return;
+    if (isLocalProject(selectedProject)) {
+      // Re-check bridge liveness first to avoid a stale offline banner
+      await refreshBridgeStatus();
+      if (!bridgeOnline) {
+        explorerTree.innerHTML = '<div style="padding:8px;color:#b91c1c;font-size:12px">○ Offline — start the Spike Agent Bridge on your PC, then refresh.</div>';
+        return;
+      }
+    }
+    await _origRefreshExplorer.apply(this, arguments);
+    // Distinguish real empty folders from disconnected state
+    if (explorerTree.textContent.trim() === "Empty project" && selectedProject) {
+      explorerTree.innerHTML = '<div style="padding:8px;color:var(--text-2);font-size:12px">📁 ' + escapeHtml(selectedProject.name) + ' — Empty project. Ask the agent to create files.</div>';
+    }
+  };
+
+  // Initial
+  refreshBridgeStatus();
+  setInterval(refreshBridgeStatus, 30000);
+})();

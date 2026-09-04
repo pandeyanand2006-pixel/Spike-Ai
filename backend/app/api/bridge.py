@@ -45,13 +45,37 @@ async def create_pairing(user: dict = Depends(get_current_user)):
 @router.post("/pair")
 async def claim_pairing(req: PairRequest, user: dict = Depends(get_current_user)):
     """Claim a pairing code and create a device."""
-    # Verify code
-    pairing = await bridge_model.verify_pairing_code(req.code)
+    # Verify code — scoped to the requesting user so one user can never
+    # claim another user's pairing code.
+    pairing = await bridge_model.verify_pairing_code(req.code, user_id=user["id"])
     if not pairing:
         raise HTTPException(status_code=400, detail="Invalid or expired pairing code.")
     # Create device
     device = await bridge_model.create_device(user["id"], name=req.name or "Windows PC")
     return {"deviceId": device["id"], "token": device["token"], "name": device["name"]}
+
+
+@router.get("/status")
+async def bridge_status(user: dict = Depends(get_current_user)):
+    """Local bridge connection status for the current user."""
+    devices = await bridge_model.list_devices(user["id"])
+    online = 0
+    for tok in list(_active_bridges.keys()):
+        try:
+            dev = await bridge_model.get_device_by_token(tok)
+        except Exception:
+            dev = None
+        if dev and str(dev.get("userId")) == str(user["id"]):
+            online += 1
+    out = []
+    for d in devices:
+        out.append({
+            "id": d["id"],
+            "name": d.get("name", "Device"),
+            "lastSeen": d.get("lastSeen", ""),
+            "status": d.get("status", "offline"),
+        })
+    return {"online": online > 0, "connections": online, "devices": out}
 
 
 @router.get("/devices")
@@ -80,13 +104,17 @@ async def delete_device(device_id: str, user: dict = Depends(get_current_user)):
 @router.post("/workspaces")
 async def register_workspace(req: WorkspaceRegister, user: dict = Depends(get_current_user)):
     """Register a local folder as a project. Called by the bridge after user selects folder."""
-    # Validate localPath is not empty and looks like a Windows path
+    # Validate localPath is present. The raw path is stored per-user as an
+    # opaque workspace reference so the cloud can route tool calls to the
+    # right local folder; it is never exposed to other users.
     path = (req.localPath or "").strip()
     if not path:
         raise HTTPException(status_code=400, detail="localPath required.")
-    # For security, don't store the raw path in DB if it's sensitive, but we need it for display
-    # We store a safe version: just the folder name and a workspaceId
-    name = req.name or Path(path).name or "Local Project"
+    if len(path) > 500:
+        raise HTTPException(status_code=400, detail="localPath too long.")
+    name = (req.name or Path(path.replace("\\", "/")).name or "Local Project").strip()[:80]
+    if not name:
+        name = "Local Project"
     # Create a project entry with type local
     # We use the existing project model but set workspace to a local identifier
     # The actual files stay on the user's PC, not on the server
@@ -164,11 +192,13 @@ async def forward_tool_to_bridge(user_id: str, project_id: str, tool: str, tool_
     # This is a simplification - in production, we'd have a proper mapping
     target_ws = None
     target_token = None
+    target_device_id = None
     for tok, ws in _active_bridges.items():
         dev = await bridge_model.get_device_by_token(tok)
         if dev and str(dev.get("userId")) == str(user_id):
             target_ws = ws
             target_token = tok
+            target_device_id = dev.get("id")
             break
     if not target_ws:
         return {"success": False, "output": "Local Agent Bridge is offline. Please ensure 'python spike_bridge/bridge.py' is running on your Windows PC and paired."}
@@ -187,6 +217,8 @@ async def forward_tool_to_bridge(user_id: str, project_id: str, tool: str, tool_
         await target_ws.send_text(json.dumps(payload))
         # Wait for result
         result = await asyncio.wait_for(fut, timeout=timeout)
+        if target_device_id:
+            await bridge_model.touch_device(target_device_id)
         return {"success": result.get("success", False), "output": result.get("output", "")}
     except asyncio.TimeoutError:
         _pending_requests.pop(req_id, None)

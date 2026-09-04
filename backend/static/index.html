@@ -216,6 +216,13 @@
               </div>
             </div>
             <div class="agent-input-area">
+              <div class="composer-meta" id="composer-meta">
+                <button class="composer-chip" id="composer-add" title="Add">+</button>
+                <span class="composer-chip composer-model" id="composer-model" title="Model">Spike Model</span>
+                <button class="composer-chip composer-project" id="composer-project" title="Select project">📁 Select project ▾</button>
+                <span class="composer-chip composer-git" id="composer-git" title="Git status">No Git</span>
+                <span class="composer-chip composer-bridge" id="composer-bridge" title="Local bridge status">○ Offline</span>
+              </div>
               <form class="agent-input-form" id="agent-form" autocomplete="off">
                 <textarea id="agent-input" rows="1" placeholder="Ask Spike Agent to build, fix, analyze…"></textarea>
                 <button type="submit" class="agent-send" id="agent-send" title="Send to agent">
@@ -227,10 +234,17 @@
           </div>
           <aside class="file-explorer" id="file-explorer" hidden>
             <div class="explorer-head">
-              <span>PROJECT FILES</span>
-              <button class="explorer-refresh" id="explorer-refresh" title="Refresh">↻</button>
+              <span class="explorer-tabs">
+                <button class="explorer-tab active" id="tab-files" type="button">Files</button>
+                <button class="explorer-tab" id="tab-changes" type="button">Changes</button>
+              </span>
+              <span class="explorer-head-actions">
+                <button class="explorer-refresh" id="git-refresh" title="Git status">⎇</button>
+                <button class="explorer-refresh" id="explorer-refresh" title="Refresh">↻</button>
+              </span>
             </div>
             <div class="explorer-tree" id="explorer-tree"></div>
+            <div class="changes-panel" id="changes-panel" hidden></div>
           </aside>
         </div>
       </div>
@@ -247,8 +261,11 @@
         </div>
         <div class="modal-body">
           <input class="project-search" id="project-search" type="text" placeholder="Search projects…" autocomplete="off" />
+          <div class="bridge-status" id="bridge-status"><span class="bridge-dot">○</span><span id="bridge-status-text">Checking local bridge…</span></div>
           <div class="project-list" id="project-list"></div>
           <button class="create-project-open" id="create-project-open">+ Create New Project</button>
+          <button class="create-project-open" id="add-local-project-btn" style="margin-top:6px">📁 Add Local Project <small style="font-weight:400">(real folder on this PC)</small></button>
+          <button class="create-project-open" id="connect-bridge-btn" style="margin-top:6px">🔌 Connect Local Agent</button>
           <button class="create-project-open" id="import-project-btn" style="margin-top:6px">📁 Import from file (ZIP)</button>
           <input type="file" id="project-zip-input" accept=".zip" hidden />
         </div>
@@ -285,6 +302,69 @@
             <button type="submit" class="btn-create" id="create-submit">Create Project</button>
           </div>
         </form>
+      </div>
+    </div>
+
+    <!-- Add Local Project -->
+    <div class="modal" id="local-project-modal" hidden>
+      <div class="modal-backdrop" id="local-project-backdrop"></div>
+      <div class="modal-panel">
+        <div class="modal-head">
+          <h3>Add Local Project</h3>
+          <button class="modal-close" id="local-project-close" aria-label="Close">×</button>
+        </div>
+        <form class="modal-body" id="local-project-form">
+          <p class="modal-hint">Choose a folder on this computer. The folder stays on your PC — the Spike Agent Bridge reads and edits it locally. Nothing is uploaded to the cloud.</p>
+          <label class="modal-label">Project name
+            <input id="lp-name" type="text" placeholder="calculator" maxlength="80" autocomplete="off" />
+          </label>
+          <label class="modal-label">Local folder path
+            <input id="lp-path" type="text" placeholder="C:\Users\Anand\Desktop\calculator" autocomplete="off" />
+          </label>
+          <p class="modal-hint" id="lp-hint">On your Windows PC, run: <code>python spike_bridge/bridge.py --workspace "C:\path\to\folder"</code> so the bridge serves this folder, then enter the same path above.</p>
+          <p class="modal-error" id="lp-error" hidden></p>
+          <div class="modal-actions">
+            <button type="button" class="btn-cancel" id="local-cancel">Cancel</button>
+            <button type="submit" class="btn-create" id="local-submit">Add Project</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Connect Local Agent (pairing) -->
+    <div class="modal" id="pairing-modal" hidden>
+      <div class="modal-backdrop" id="pairing-backdrop"></div>
+      <div class="modal-panel">
+        <div class="modal-head">
+          <h3>Connect Local Agent</h3>
+          <button class="modal-close" id="pairing-close" aria-label="Close">×</button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-hint">Pair the Spike Agent Bridge running on your Windows PC with your Spike AI account.</p>
+          <div class="pairing-code" id="pairing-code">····</div>
+          <button class="create-project-open" id="pairing-generate">Generate pairing code</button>
+          <p class="modal-hint">Then on your PC run:<br /><code>python spike_bridge/bridge.py --pair &lt;CODE&gt;</code><br />followed by:<br /><code>python spike_bridge/bridge.py</code></p>
+          <div class="pairing-devices" id="pairing-devices"></div>
+          <p class="modal-error" id="pairing-error" hidden></p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Confirm (remove project etc.) -->
+    <div class="modal" id="confirm-modal" hidden>
+      <div class="modal-backdrop" id="confirm-backdrop"></div>
+      <div class="modal-panel" style="max-width:440px">
+        <div class="modal-head">
+          <h3 id="confirm-title">Remove project?</h3>
+          <button class="modal-close" id="confirm-close" aria-label="Close">×</button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-hint" id="confirm-message"></p>
+          <div class="modal-actions">
+            <button type="button" class="btn-cancel" id="confirm-cancel">Cancel</button>
+            <button type="button" class="btn-create btn-danger" id="confirm-ok">Remove</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>

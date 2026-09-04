@@ -172,11 +172,21 @@ def detect_stack(workspace: Path) -> str:
     if has("index.html") and has("style.css"):
         stacks.append("HTML")
     if not stacks:
-        # check dirs
-        if (workspace / "src").exists():
-            stacks.append("Unknown (src/)")
-        else:
+        # Only report "Empty" when the directory genuinely contains zero
+        # usable files (ignoring dotfiles). Otherwise label it honestly.
+        try:
+            usable = [
+                p for p in workspace.iterdir()
+                if not p.name.startswith(".") and p.name not in IGNORE_DIRS
+            ]
+        except Exception:
+            usable = []
+        if not usable:
             stacks.append("Empty")
+        elif (workspace / "src").exists():
+            stacks.append("General (src/)")
+        else:
+            stacks.append("General")
     return " + ".join(stacks[:3])
 
 

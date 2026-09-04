@@ -133,16 +133,51 @@ def set_workspace(path: str):
 
 # --- Tool execution (mirrors agent_tools.py but for local) ---
 
+BLOCKED_NAMES = {".ssh", ".gnupg", ".aws", ".env", "id_rsa", "id_ed25519"}
+
+BLOCKED_ABSOLUTE_PREFIXES = (
+    "c:/windows",
+    "c:/program files",
+    "c:/program files (x86)",
+    "c:/programdata",
+)
+
+
 def _resolve_local(workspace: Path, rel: str) -> Path:
-    """Resolve a relative path inside workspace, prevent traversal."""
+    """Resolve a relative path inside workspace, prevent traversal.
+
+    Blocks: ../ escapes, absolute paths, UNC paths (\\\\server),
+    drive changes (D:/... vs C:/...), symlink escapes, and sensitive
+    locations (.ssh, keys, Windows system dirs).
+    """
     if not rel:
         raise ValueError("Path required")
-    p = rel.strip().replace("\\", "/").lstrip("/")
-    full = (workspace / p).resolve()
+    raw = rel.strip()
+    if raw.startswith("\\\\") or raw.startswith("//"):
+        raise ValueError(f"UNC paths are blocked: {rel}")
+    if len(raw) >= 2 and raw[1] == ":":
+        raise ValueError(f"Absolute paths are blocked (use workspace-relative): {rel}")
+    p = raw.replace("\\", "/").lstrip("/")
+    if not p or p in (".", "./"):
+        return workspace.resolve()
+    parts = [seg for seg in p.split("/") if seg not in ("", ".")]
+    if ".." in parts:
+        raise ValueError(f"Path escapes workspace: {rel}")
+    if any(seg in BLOCKED_NAMES for seg in parts):
+        raise ValueError(f"Access to sensitive path is blocked: {rel}")
+    ws = workspace.resolve()
+    full = (ws / "/".join(parts)).resolve()
     try:
-        full.relative_to(workspace.resolve())
+        full.relative_to(ws)
     except ValueError:
         raise ValueError(f"Path escapes workspace: {rel}")
+    # Drive-change guard (Windows): resolved path must stay on the same drive
+    if ws.drive and full.drive and ws.drive.lower() != full.drive.lower():
+        raise ValueError(f"Path escapes workspace drive: {rel}")
+    lowered = full.as_posix().lower()
+    for prefix in BLOCKED_ABSOLUTE_PREFIXES:
+        if lowered == prefix or lowered.startswith(prefix + "/"):
+            raise ValueError(f"System path is blocked: {rel}")
     return full
 
 
@@ -349,6 +384,51 @@ async def execute_local_tool(workspace: Path, tool: str, inp: Dict[str, Any]) ->
                 out = out[:4000] + "\n…[truncated]\n" + out[-3500:]
             return {"success": proc.returncode == 0, "output": f"$ {cmd}\n(exit {proc.returncode})\n" + (out or "(no output)")}
 
+        elif tool == "create_directory":
+            path = inp.get("path", "")
+            full = _resolve_local(workspace, path)
+            full.mkdir(parents=True, exist_ok=True)
+            return {"success": True, "output": f"Created directory {path}"}
+
+        elif tool == "move_file":
+            src = inp.get("src", inp.get("path", ""))
+            dst = inp.get("dst", inp.get("dest", inp.get("new_path", "")))
+            if not src or not dst:
+                return {"success": False, "output": "move_file needs src and dst"}
+            full_src = _resolve_local(workspace, src)
+            full_dst = _resolve_local(workspace, dst)
+            if not full_src.exists():
+                return {"success": False, "output": f"Not found: {src}"}
+            if full_dst.exists():
+                return {"success": False, "output": f"Destination exists: {dst}"}
+            full_dst.parent.mkdir(parents=True, exist_ok=True)
+            full_src.rename(full_dst)
+            return {"success": True, "output": f"Moved {src} -> {dst}"}
+
+        elif tool == "git_status":
+            import subprocess
+            proc = subprocess.run(
+                ["git", "status", "--short", "--branch"],
+                cwd=str(workspace), capture_output=True, text=True, timeout=10,
+            )
+            out = (proc.stdout or proc.stderr or "").strip() or "(clean)"
+            br = subprocess.run(
+                ["git", "branch", "--show-current"],
+                cwd=str(workspace), capture_output=True, text=True, timeout=10,
+            )
+            branch = (br.stdout or "").strip() or "detached"
+            return {"success": proc.returncode == 0, "output": f"branch: {branch}\n{out[:6000]}"}
+
+        elif tool == "git_diff":
+            import subprocess
+            rel = (inp.get("path", "") or "").strip().replace("\\", "/").lstrip("/")
+            if ".." in rel.split("/"):
+                return {"success": False, "output": "Invalid path."}
+            args = ["git", "diff", "--", rel] if rel else ["git", "diff", "--stat"]
+            proc = subprocess.run(args, cwd=str(workspace), capture_output=True, text=True, timeout=10)
+            out = (proc.stdout or "").strip() or "(no changes)"
+            return {"success": proc.returncode == 0, "output": out[:12000]}
+
         else:
             return {"success": False, "output": f"Unknown tool: {tool}"}
     except Exception as e:
@@ -390,6 +470,23 @@ async def bridge_loop():
         return s
 
     last_tree = scan()
+    # mtime snapshot for modified detection (debounced)
+    def snapshot_mtimes():
+        m = {}
+        for root, dirs, files in os.walk(workspace):
+            dirs[:] = [d for d in dirs if d not in IGNORE_DIRS and not d.startswith(".")]
+            for f in files:
+                if f == ".env":
+                    continue
+                p = Path(root) / f
+                try:
+                    rel = p.relative_to(workspace).as_posix()
+                    m[rel] = (p.stat().st_mtime, p.stat().st_size)
+                except Exception:
+                    pass
+        return m
+
+    last_mtimes = snapshot_mtimes()
     backoff = 1
     while True:
         try:
@@ -398,28 +495,39 @@ async def bridge_loop():
                 backoff = 1
                 # Send initial hello
                 await ws.send(json.dumps({"type": "hello", "workspace": str(workspace)}))
-                # Watcher task
+                # Watcher task (created/modified/deleted, debounced)
                 async def watcher():
-                    nonlocal last_tree
+                    nonlocal last_tree, last_mtimes
+                    pending: dict = {}  # path -> (change, first_seen)
                     while True:
                         await asyncio.sleep(2)
                         try:
                             cur = scan()
-                            # Detect changes
+                            cur_mtimes = snapshot_mtimes()
                             added = cur - last_tree
                             removed = last_tree - cur
+                            now = time.time()
+                            for p in added:
+                                pending[p] = ("created", pending.get(p, (None, now))[1])
+                            for p in removed:
+                                pending[p] = ("deleted", pending.get(p, (None, now))[1])
+                            for p in cur & last_tree:
+                                old = last_mtimes.get(p)
+                                new = cur_mtimes.get(p)
+                                if old and new and (new[0] != old[0] or new[1] != old[1]):
+                                    if p not in pending:
+                                        pending[p] = ("modified", now)
+                            # Flush events older than 2s (debounce duplicate bursts)
+                            ready = [p for p, (_, ts) in pending.items() if now - ts >= 2]
+                            for p in ready[:10]:
+                                change, _ = pending.pop(p)
+                                try:
+                                    await ws.send(json.dumps({"type": "file_changed", "path": p, "change": change}))
+                                except Exception:
+                                    pass
                             if added or removed:
-                                for p in list(added)[:5]:
-                                    try:
-                                        await ws.send(json.dumps({"type": "file_changed", "path": p, "change": "created"}))
-                                    except:
-                                        pass
-                                for p in list(removed)[:5]:
-                                    try:
-                                        await ws.send(json.dumps({"type": "file_changed", "path": p, "change": "deleted"}))
-                                    except:
-                                        pass
                                 last_tree = cur
+                            last_mtimes = cur_mtimes
                         except Exception:
                             pass
                 watch_task = asyncio.create_task(watcher())
@@ -457,6 +565,7 @@ def main():
     parser.add_argument("--pair", metavar="CODE", help="Pair with Spike AI using a code from the web UI")
     parser.add_argument("--workspace", metavar="PATH", help="Set local project folder")
     parser.add_argument("--status", action="store_true", help="Show bridge status")
+    parser.add_argument("--start", action="store_true", help="Start the bridge (same as no args; 'spike-agent start')")
     parser.add_argument("--cloud", metavar="URL", help="Cloud URL (default: https://spike-ai.onrender.com)")
     args = parser.parse_args()
 
@@ -470,7 +579,7 @@ def main():
     if args.workspace:
         set_workspace(args.workspace)
         return
-    if len(sys.argv) == 1:
+    if len(sys.argv) == 1 or args.start:
         # Default: start bridge
         try:
             asyncio.run(bridge_loop())
