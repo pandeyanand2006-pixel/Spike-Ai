@@ -6,12 +6,16 @@ from typing import Any, Dict, AsyncGenerator, List, Optional
 
 from app.config import get_settings
 from app.services.ai_service import ai_service
+from pathlib import Path
+
 from app.services.agent_tools import (
     TOOL_REGISTRY,
     READ_TOOLS,
     WRITE_TOOLS,
     DESTRUCTIVE_TOOLS,
     SHELL_TOOLS,
+    WORKSPACE as DEFAULT_WORKSPACE,
+    get_tool_registry,
     is_dangerous_command,
     mask_secrets,
 )
@@ -144,24 +148,20 @@ async def call_llm(messages: List[Dict[str, str]], model: Optional[str] = None) 
         return f"LLM error: {e}"
 
 
-async def execute_tool(tool: str, inp: Dict[str, Any], mode: str) -> Dict[str, Any]:
-    """Execute a registered tool with permission checks."""
-    # Plan mode: only read tools
+async def execute_tool(tool: str, inp: Dict[str, Any], mode: str, workspace: Path | None = None) -> Dict[str, Any]:
+    """Execute a registered tool with permission checks (workspace-aware)."""
     if mode == "plan" and tool not in READ_TOOLS:
         return {"success": False, "output": f"Tool '{tool}' is not allowed in Plan mode (read-only). Switch to Build to modify files/run commands."}
-    # Destructive tools require explicit care (we allow but warn)
     if tool in DESTRUCTIVE_TOOLS and mode != "build":
         return {"success": False, "output": f"Tool '{tool}' requires Build mode."}
-    # Shell dangerous check is done at loop level to emit approval_required; here we just execute.
-    entry = TOOL_REGISTRY.get(tool)
+    registry = get_tool_registry(workspace) if workspace is not None else TOOL_REGISTRY
+    entry = registry.get(tool)
     if not entry:
         return {"success": False, "output": f"Unknown tool: {tool}"}
     try:
         fn = entry["fn"]
         result = fn(**inp)
-        # Ensure shape
         if isinstance(result, dict) and "success" in result:
-            # Mask secrets in output
             if "output" in result:
                 result["output"] = mask_secrets(str(result["output"]))
             return result
@@ -183,9 +183,20 @@ async def stream_agent_loop(
     mode: str,
     model: Optional[str],
     history: List[Dict[str, str]],
+    workspace: Path | None = None,
+    project_info: Dict[str, Any] | None = None,
 ) -> AsyncGenerator[Dict[str, Any], None]:
-    """Core agent loop — yields structured events."""
+    """Core agent loop — yields structured events (workspace-aware)."""
     system = build_system_prompt(mode or "build")
+    # Inject project context if available
+    if project_info:
+        proj_ctx = f"\n\nCURRENT PROJECT:\nName: {project_info.get('name','')}\nWorkspace: {project_info.get('workspace','')}\nStack: {project_info.get('stack','')}\nTemplate: {project_info.get('template','')}\n"
+        if project_info.get("description"):
+            proj_ctx += f"Description: {project_info['description']}\n"
+        system += proj_ctx
+        # Also hint the model about workspace root
+        if workspace is not None:
+            system += f"\nAll file paths are relative to this project's workspace root. Do not use absolute paths.\n"
     # Seed messages: system + optional history + current task
     messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
     # Include prior turn history (trimmed)
@@ -195,9 +206,8 @@ async def stream_agent_loop(
     messages.append({"role": "user", "content": user_message})
 
     # Always start with a quick project inspection to ground the LLM
-    # (We emit this as a real tool execution so the frontend sees activity.)
     yield {"type": "thinking", "content": "Inspecting project…"}
-    insp = await execute_tool("inspect_project", {}, mode)
+    insp = await execute_tool("inspect_project", {}, mode, workspace=workspace)
     yield {"type": "tool_start", "tool": "inspect_project", "input": {}}
     yield {"type": "tool_result", "tool": "inspect_project", "success": insp["success"], "output": insp["output"][:6000]}
     messages.append({"role": "assistant", "content": json.dumps({"tool": "inspect_project", "input": {}})})
@@ -245,7 +255,7 @@ async def stream_agent_loop(
             # In strict mode you'd wait; here we continue.
 
         yield {"type": "tool_start", "tool": tool, "input": inp}
-        result = await execute_tool(tool, inp, mode)
+        result = await execute_tool(tool, inp, mode, workspace=workspace)
         # Track changed files
         if tool in ("write_file", "edit_file") and result.get("success"):
             p = inp.get("path")

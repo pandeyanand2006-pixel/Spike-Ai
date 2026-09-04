@@ -20,4 +20,5 @@ Thumbs.db
 
 # Generated runtime artifacts (images / ppt / pdf)
 backend/static/generated/
+workspaces/
 

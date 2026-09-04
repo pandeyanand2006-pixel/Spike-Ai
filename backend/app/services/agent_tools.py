@@ -74,22 +74,22 @@ def is_dangerous_command(cmd: str) -> bool:
     return False
 
 
-def _resolve_path(path: str) -> Path:
+def _resolve_path(path: str, workspace: Path | None = None) -> Path:
     """Resolve path inside workspace; raise ValueError if traversal attempted."""
+    ws = (workspace or WORKSPACE).resolve()
     if not path:
         raise ValueError("Path is required")
-    # Normalize - strip leading / and handle backslashes
-    p = path.strip().replace("\\", "/")
-    # Remove leading slash to keep relative to workspace
-    p = p.lstrip("/")
-    # Join and resolve
-    full = (WORKSPACE / p).resolve()
-    # Ensure within workspace
+    p = path.strip().replace("\\", "/").lstrip("/")
+    full = (ws / p).resolve()
     try:
-        full.relative_to(WORKSPACE)
+        full.relative_to(ws)
     except ValueError:
         raise ValueError(f"Path escapes workspace: {path}")
     return full
+
+
+def _resolve_for_ws(workspace: Path | None, path: str) -> Path:
+    return _resolve_path(path, workspace)
 
 
 def _is_ignored(path: Path) -> bool:
@@ -106,9 +106,9 @@ def _is_ignored(path: Path) -> bool:
 
 # ---- Tool implementations ----
 
-def tool_read_file(path: str, offset: int = 1, limit: int = 200) -> Dict[str, Any]:
+def tool_read_file(path: str, offset: int = 1, limit: int = 200, workspace: Path | None = None) -> Dict[str, Any]:
     try:
-        full = _resolve_path(path)
+        full = _resolve_path(path, workspace)
     except ValueError as e:
         return {"success": False, "output": str(e)}
     if not full.exists():
@@ -136,9 +136,9 @@ def tool_read_file(path: str, offset: int = 1, limit: int = 200) -> Dict[str, An
     return {"success": True, "output": header + body}
 
 
-def tool_write_file(path: str, content: str) -> Dict[str, Any]:
+def tool_write_file(path: str, content: str, workspace: Path | None = None) -> Dict[str, Any]:
     try:
-        full = _resolve_path(path)
+        full = _resolve_path(path, workspace)
     except ValueError as e:
         return {"success": False, "output": str(e)}
     # Prevent writing ignored locations like .env by accident
@@ -153,9 +153,9 @@ def tool_write_file(path: str, content: str) -> Dict[str, Any]:
     return {"success": True, "output": f"Written {path} ({len(content or '')} chars)"}
 
 
-def tool_edit_file(path: str, old_string: str, new_string: str) -> Dict[str, Any]:
+def tool_edit_file(path: str, old_string: str, new_string: str, workspace: Path | None = None) -> Dict[str, Any]:
     try:
-        full = _resolve_path(path)
+        full = _resolve_path(path, workspace)
     except ValueError as e:
         return {"success": False, "output": str(e)}
     if not full.exists():
@@ -185,9 +185,9 @@ def tool_edit_file(path: str, old_string: str, new_string: str) -> Dict[str, Any
     return {"success": True, "output": f"Edited {path}\n{diff_text or '(no diff)'}"}
 
 
-def tool_delete_file(path: str) -> Dict[str, Any]:
+def tool_delete_file(path: str, workspace: Path | None = None) -> Dict[str, Any]:
     try:
-        full = _resolve_path(path)
+        full = _resolve_path(path, workspace)
     except ValueError as e:
         return {"success": False, "output": str(e)}
     if not full.exists():
@@ -201,9 +201,10 @@ def tool_delete_file(path: str) -> Dict[str, Any]:
     return {"success": True, "output": f"Deleted {path}"}
 
 
-def tool_list_directory(path: str = ".") -> Dict[str, Any]:
+def tool_list_directory(path: str = ".", workspace: Path | None = None) -> Dict[str, Any]:
+    ws = (workspace or WORKSPACE).resolve()
     try:
-        full = _resolve_path(path or ".")
+        full = _resolve_path(path or ".", workspace)
     except ValueError as e:
         return {"success": False, "output": str(e)}
     if not full.exists():
@@ -226,13 +227,14 @@ def tool_list_directory(path: str = ".") -> Dict[str, Any]:
             if len(entries) > 200:
                 entries.append("…[truncated 200+ entries]")
                 break
-        header = f"# {path or '.'}  ({len(entries)} entries, workspace: {WORKSPACE.name})\n"
+        header = f"# {path or '.'}  ({len(entries)} entries, workspace: {ws.name})\n"
         return {"success": True, "output": header + "\n".join(entries)}
     except Exception as e:
         return {"success": False, "output": f"List failed: {e}"}
 
 
-def tool_search_files(pattern: str, include: str = "") -> Dict[str, Any]:
+def tool_search_files(pattern: str, include: str = "", workspace: Path | None = None) -> Dict[str, Any]:
+    ws = (workspace or WORKSPACE).resolve()
     if not pattern:
         return {"success": False, "output": "pattern is required"}
     # Decide if pattern is regex or plain
@@ -247,7 +249,7 @@ def tool_search_files(pattern: str, include: str = "") -> Dict[str, Any]:
     max_results = 80
     pat_re = re.compile(pattern, re.I) if is_regex else None
     needle = pattern.lower() if not is_regex else None
-    for root, dirs, files in os.walk(WORKSPACE):
+    for root, dirs, files in os.walk(ws):
         # prune ignored dirs
         dirs[:] = [d for d in dirs if d not in IGNORE_DIRS and not d.startswith(".")]
         # also skip generated
@@ -259,7 +261,10 @@ def tool_search_files(pattern: str, include: str = "") -> Dict[str, Any]:
             if include_glob and not fnmatch.fnmatch(fname, include_glob):
                 continue
             fpath = Path(root) / fname
-            rel = fpath.relative_to(WORKSPACE).as_posix()
+            try:
+                rel = fpath.relative_to(ws).as_posix()
+            except ValueError:
+                continue
             # filename match
             hit = False
             details = ""
@@ -315,9 +320,9 @@ def tool_search_files(pattern: str, include: str = "") -> Dict[str, Any]:
     return {"success": True, "output": header + "\n".join(results)}
 
 
-def tool_get_file_info(path: str) -> Dict[str, Any]:
+def tool_get_file_info(path: str, workspace: Path | None = None) -> Dict[str, Any]:
     try:
-        full = _resolve_path(path)
+        full = _resolve_path(path, workspace)
     except ValueError as e:
         return {"success": False, "output": str(e)}
     if not full.exists():
@@ -344,12 +349,13 @@ def tool_get_file_info(path: str) -> Dict[str, Any]:
         return {"success": False, "output": f"Info failed: {e}"}
 
 
-def tool_inspect_project() -> Dict[str, Any]:
+def tool_inspect_project(workspace: Path | None = None) -> Dict[str, Any]:
+    ws = (workspace or WORKSPACE).resolve()
     lines: List[str] = []
-    lines.append(f"# Workspace: {WORKSPACE}")
+    lines.append(f"# Workspace: {ws}")
     lines.append("")
     # Detect stacks
-    has = lambda p: (WORKSPACE / p).exists()
+    has = lambda p: (ws / p).exists()
     checks = {
         "Python": ["requirements.txt", "pyproject.toml", "Pipfile", "setup.py", "main.py", "app.py"],
         "Node": ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"],
@@ -361,21 +367,21 @@ def tool_inspect_project() -> Dict[str, Any]:
     detected = []
     for stack, files in checks.items():
         for f in files:
-            if has(f) or (WORKSPACE / "backend" / f).exists():
+            if has(f):
                 detected.append(stack)
                 break
-    # also check backend
-    if (WORKSPACE / "backend").exists():
+    # also check nested backend for legacy Spike repo
+    if (ws / "backend").exists() and "Python" not in detected:
         detected.append("FastAPI (backend/)")
     if not detected:
         detected = ["Unknown"]
     lines.append(f"Detected stack: {', '.join(detected)}")
     lines.append("")
-    # Important dirs
+    # Important dirs — generic: show top-level dirs
     lines.append("## Important directories")
-    for d in [".", "backend", "backend/app", "backend/app/api", "backend/app/services", "backend/static", "backend/static/js", "backend/static/css"]:
-        p = WORKSPACE / d
-        if p.exists():
+    for d in [".", "src", "src/components", "src/pages", "public", "backend", "server", "app"]:
+        p = ws / d
+        if p.exists() and p.is_dir():
             try:
                 count = len([x for x in p.iterdir() if x.name not in IGNORE_DIRS])
                 lines.append(f"- {d}/  ({count} entries)")
@@ -383,17 +389,17 @@ def tool_inspect_project() -> Dict[str, Any]:
                 lines.append(f"- {d}/")
     lines.append("")
     lines.append("## Config files present")
-    for f in ["requirements.txt", "backend/requirements.txt", ".env.example", "package.json", "vite.config.js", "next.config.js", "pyproject.toml"]:
+    for f in ["package.json", "requirements.txt", "pyproject.toml", "vite.config.js", "next.config.js", "tsconfig.json", ".env.example", "README.md"]:
         if has(f):
             lines.append(f"- {f}")
     lines.append("")
     lines.append("## Entry points")
-    for f in ["backend/main.py", "backend/app/main.py", "main.py", "app.py", "src/main.jsx", "src/App.jsx"]:
+    for f in ["main.py", "app.py", "src/main.jsx", "src/App.jsx", "src/main.js", "server/index.js", "app/page.js", "index.html"]:
         if has(f):
             lines.append(f"- {f}")
     # Top-level listing
     try:
-        top = [p.name + ("/" if p.is_dir() else "") for p in sorted(WORKSPACE.iterdir()) if p.name not in IGNORE_DIRS][:40]
+        top = [p.name + ("/" if p.is_dir() else "") for p in sorted(ws.iterdir()) if p.name not in IGNORE_DIRS][:40]
         lines.append("")
         lines.append("## Top-level")
         lines.append(", ".join(top))
@@ -402,17 +408,16 @@ def tool_inspect_project() -> Dict[str, Any]:
     return {"success": True, "output": "\n".join(lines)}
 
 
-def tool_run_command(command: str, workdir: str = "", timeout: int = 30) -> Dict[str, Any]:
+def tool_run_command(command: str, workdir: str = "", timeout: int = 30, workspace: Path | None = None) -> Dict[str, Any]:
+    ws = (workspace or WORKSPACE).resolve()
     if not command or not command.strip():
         return {"success": False, "output": "command is required"}
     if is_dangerous_command(command) and "force" not in command.lower():
-        # Still allow but flagged; caller should gate. We return flagged but don't block.
         pass
-    # Resolve workdir
-    wd = WORKSPACE
+    wd = ws
     if workdir:
         try:
-            wd = _resolve_path(workdir)
+            wd = _resolve_path(workdir, workspace=ws)
         except ValueError as e:
             return {"success": False, "output": str(e)}
         if not wd.is_dir():
@@ -437,7 +442,12 @@ def tool_run_command(command: str, workdir: str = "", timeout: int = 30) -> Dict
         # Truncate
         if len(out) > MAX_OUTPUT_CHARS:
             out = out[:4000] + "\n…[truncated]…\n" + out[-3500:]
-        header = f"$ {command}\n(exit {proc.returncode}, cwd={wd.relative_to(WORKSPACE) if wd != WORKSPACE else '.'})\n"
+        try:
+            rel = wd.relative_to(ws)
+            cwd_str = str(rel) if str(rel) != "." else "."
+        except ValueError:
+            cwd_str = str(wd)
+        header = f"$ {command}\n(exit {proc.returncode}, cwd={cwd_str})\n"
         success = proc.returncode == 0
         return {"success": success, "output": header + (out or "(no output)")}
     except subprocess.TimeoutExpired as e:
@@ -504,3 +514,55 @@ READ_TOOLS = {"read_file", "list_directory", "search_files", "get_file_info", "i
 WRITE_TOOLS = {"write_file", "edit_file"}
 DESTRUCTIVE_TOOLS = {"delete_file"}
 SHELL_TOOLS = {"run_command"}
+
+
+def get_tool_registry(workspace: Path | None = None) -> Dict[str, Dict[str, Any]]:
+    """Return a registry bound to a specific workspace (for per-project isolation)."""
+    ws = (workspace or WORKSPACE).resolve()
+    return {
+        "read_file": {
+            "description": "Read a file (supports offset/limit for large files).",
+            "params": ["path", "offset", "limit"],
+            "fn": lambda **kw: tool_read_file(kw.get("path", ""), int(kw.get("offset", 1) or 1), int(kw.get("limit", 200) or 200), workspace=ws),
+        },
+        "write_file": {
+            "description": "Create or overwrite a file with given content.",
+            "params": ["path", "content"],
+            "fn": lambda **kw: tool_write_file(kw.get("path", ""), kw.get("content", ""), workspace=ws),
+        },
+        "edit_file": {
+            "description": "Precisely edit a file by replacing old_string with new_string (read file first).",
+            "params": ["path", "old_string", "new_string"],
+            "fn": lambda **kw: tool_edit_file(kw.get("path", ""), kw.get("old_string", ""), kw.get("new_string", ""), workspace=ws),
+        },
+        "delete_file": {
+            "description": "Delete a single file (requires approval; directories blocked).",
+            "params": ["path"],
+            "fn": lambda **kw: tool_delete_file(kw.get("path", ""), workspace=ws),
+        },
+        "list_directory": {
+            "description": "List files and directories at a path.",
+            "params": ["path"],
+            "fn": lambda **kw: tool_list_directory(kw.get("path", "") or ".", workspace=ws),
+        },
+        "search_files": {
+            "description": "Search project files by text/regex. Use include glob like *.py.",
+            "params": ["pattern", "include"],
+            "fn": lambda **kw: tool_search_files(kw.get("pattern", ""), kw.get("include", ""), workspace=ws),
+        },
+        "get_file_info": {
+            "description": "Get file metadata (exists, size, ext, modified).",
+            "params": ["path"],
+            "fn": lambda **kw: tool_get_file_info(kw.get("path", ""), workspace=ws),
+        },
+        "inspect_project": {
+            "description": "High-level project discovery: stack, dirs, config, entry points.",
+            "params": [],
+            "fn": lambda **kw: tool_inspect_project(workspace=ws),
+        },
+        "run_command": {
+            "description": "Execute a shell command in the workspace (npm, python, git, etc.).",
+            "params": ["command", "workdir", "timeout"],
+            "fn": lambda **kw: tool_run_command(kw.get("command", ""), kw.get("workdir", ""), int(kw.get("timeout", 30) or 30), workspace=ws),
+        },
+    }

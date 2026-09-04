@@ -11,7 +11,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def create_agent_session(user_id: str, title: str, mode: str) -> dict:
+async def create_agent_session(user_id: str, title: str, mode: str, project_id: Optional[str] = None) -> dict:
     now = _now()
     doc = {
         "userId": ObjectId(user_id),
@@ -24,6 +24,11 @@ async def create_agent_session(user_id: str, title: str, mode: str) -> dict:
         "toolEvents": [],
         "changedFiles": [],
     }
+    if project_id:
+        try:
+            doc["projectId"] = ObjectId(project_id)
+        except Exception:
+            doc["projectId"] = project_id
     result = await get_db().agent_sessions.insert_one(doc)
     return {**doc, "id": str(result.inserted_id)}
 
@@ -41,10 +46,17 @@ async def get_agent_session(user_id: str, session_id: str) -> Optional[dict]:
     return doc
 
 
-async def list_agent_sessions(user_id: str, limit: int = 50) -> List[dict]:
-    cursor = get_db().agent_sessions.find({"userId": ObjectId(user_id)}).sort("updatedAt", -1).limit(limit)
+async def list_agent_sessions(user_id: str, limit: int = 50, project_id: Optional[str] = None) -> List[dict]:
+    q: dict = {"userId": ObjectId(user_id)}
+    if project_id:
+        try:
+            q["projectId"] = ObjectId(project_id)
+        except Exception:
+            q["projectId"] = project_id
+    cursor = get_db().agent_sessions.find(q).sort("updatedAt", -1).limit(limit)
     out = []
     async for doc in cursor:
+        pid = doc.get("projectId")
         out.append(
             {
                 "id": str(doc["_id"]),
@@ -54,6 +66,7 @@ async def list_agent_sessions(user_id: str, limit: int = 50) -> List[dict]:
                 "createdAt": doc.get("createdAt", ""),
                 "updatedAt": doc.get("updatedAt", ""),
                 "messageCount": len(doc.get("messages", [])),
+                "projectId": str(pid) if pid else None,
             }
         )
     return out

@@ -1913,7 +1913,9 @@ function agentAutoResize() {
 async function loadAgentSessions() {
   if (!agentList) return;
   try {
-    const res = await fetch("/api/agent/sessions", { headers: authHeaders() });
+    const pid = selectedProject ? selectedProject.id : null;
+    const url = "/api/agent/sessions" + (pid ? "?projectId="+encodeURIComponent(pid) : "");
+    const res = await fetch(url, { headers: authHeaders() });
     if (!res.ok) return;
     const items = await res.json();
     agentList.innerHTML = "";
@@ -2096,10 +2098,314 @@ if (agentInput) {
 document.querySelectorAll(".agent-sg").forEach((b)=>{
   b.addEventListener("click", ()=> sendAgent(b.dataset.prompt));
 });
+
+/* ============================================================
+   Projects / Workspace — real per-project isolation
+   ============================================================ */
+const addPopover = document.getElementById("add-popover");
+const addProjectBtn = document.getElementById("add-project-btn");
+const projectSelector = document.getElementById("project-selector");
+const projectSelectorClose = document.getElementById("project-selector-close");
+const projectSelectorBackdrop = document.getElementById("project-selector-backdrop");
+const projectSearch = document.getElementById("project-search");
+const projectListEl = document.getElementById("project-list");
+const createProjectOpen = document.getElementById("create-project-open");
+const createProjectModal = document.getElementById("create-project-modal");
+const createProjectClose = document.getElementById("create-project-close");
+const createProjectBackdrop = document.getElementById("create-project-backdrop");
+const createProjectForm = document.getElementById("create-project-form");
+const cpName = document.getElementById("cp-name");
+const cpDesc = document.getElementById("cp-desc");
+const templateGrid = document.getElementById("template-grid");
+const projectBar = document.getElementById("project-bar");
+const projectBarMain = document.getElementById("project-bar-main");
+const projectBarName = document.getElementById("project-bar-name");
+const projectBarStack = document.getElementById("project-bar-stack");
+const projectChangeBtn = document.getElementById("project-change");
+const explorerToggle = document.getElementById("explorer-toggle");
+const fileExplorer = document.getElementById("file-explorer");
+const explorerTree = document.getElementById("explorer-tree");
+const explorerRefresh = document.getElementById("explorer-refresh");
+const sidebarProject = document.getElementById("sidebar-project");
+const sidebarProjectBtn = document.getElementById("sidebar-project-btn");
+const sidebarProjectName = document.getElementById("sidebar-project-name");
+const sidebarProjectStack = document.getElementById("sidebar-project-stack");
+
+let selectedProject = null;
+let selectedTemplate = "other";
+let projectsCache = [];
+
+function getSelectedProjectId() { return localStorage.getItem("spike_project_id"); }
+function setSelectedProjectId(id) { if (id) localStorage.setItem("spike_project_id", id); else localStorage.removeItem("spike_project_id"); }
+
+function openProjectSelector() {
+  if (projectSelector) projectSelector.hidden = false;
+  if (projectSearch) { projectSearch.value = ""; projectSearch.focus(); }
+  loadProjects();
+}
+function closeProjectSelector() { if (projectSelector) projectSelector.hidden = true; }
+function openCreateModal() {
+  closeProjectSelector();
+  if (createProjectModal) createProjectModal.hidden = false;
+  if (cpName) setTimeout(()=>cpName.focus(), 80);
+}
+function closeCreateModal() { if (createProjectModal) createProjectModal.hidden = true; }
+
+async function loadProjects(search="") {
+  if (!projectListEl) return;
+  projectListEl.innerHTML = '<div style="padding:12px;color:var(--text-2);font-size:13px">Loading…</div>';
+  try {
+    const url = "/api/projects" + (search ? "?search="+encodeURIComponent(search) : "");
+    const res = await fetch(url, { headers: authHeaders() });
+    if (res.status === 401) {
+      projectListEl.innerHTML = '<div style="padding:12px;color:var(--text-2);font-size:13px">Sign in to manage projects.</div>';
+      return;
+    }
+    if (!res.ok) throw new Error("Failed to load");
+    const items = await res.json();
+    projectsCache = items;
+    renderProjectList(items);
+  } catch (e) {
+    projectListEl.innerHTML = '<div style="padding:12px;color:#ef4444;font-size:13px">'+escapeHtml(e.message)+'</div>';
+  }
+}
+function renderProjectList(items) {
+  if (!projectListEl) return;
+  if (!items.length) {
+    projectListEl.innerHTML = '<div style="padding:12px;color:var(--text-2);font-size:13px">No projects yet. Create one to start.</div>';
+    return;
+  }
+  projectListEl.innerHTML = "";
+  items.forEach((p) => {
+    const el = document.createElement("button");
+    el.className = "project-item" + (selectedProject && selectedProject.id===p.id ? " active" : "");
+    const time = p.lastOpenedAt ? new Date(p.lastOpenedAt).toLocaleDateString() : "";
+    el.innerHTML = '<span class="project-item-ico">📁</span><span class="project-item-info"><span class="project-item-name">'+escapeHtml(p.name)+'</span><span class="project-item-meta">'+escapeHtml(p.stack||p.template||"")+'</span></span><span class="project-item-time">'+escapeHtml(time)+'</span>';
+    el.addEventListener("click", ()=> selectProject(p));
+    projectListEl.appendChild(el);
+  });
+}
+async function selectProject(p) {
+  selectedProject = p;
+  setSelectedProjectId(p.id);
+  updateProjectUI();
+  closeProjectSelector();
+  closeCreateModal();
+  showAgentView();
+  // Refresh explorer and agent sessions for this project
+  await refreshExplorer();
+  loadAgentSessions();
+  toast("Project: "+p.name);
+}
+function updateProjectUI() {
+  const name = selectedProject ? selectedProject.name : "Select a project";
+  const stack = selectedProject ? (selectedProject.stack || selectedProject.template || "") : "Choose a workspace for Spike Agent";
+  if (projectBarName) projectBarName.textContent = name;
+  if (projectBarStack) projectBarStack.textContent = stack;
+  if (sidebarProjectName) sidebarProjectName.textContent = name;
+  if (sidebarProjectStack) sidebarProjectStack.textContent = stack;
+  if (sidebarProject) sidebarProject.hidden = !selectedProject;
+  if (projectBar) projectBar.hidden = false;
+  if (explorerToggle) explorerToggle.hidden = !selectedProject;
+  if (selectedProject) {
+    agentEmpty.querySelector(".agent-empty-sub").textContent = 'Working in "'+selectedProject.name+'" — ask me to build, fix, analyze, or refactor.';
+  }
+}
+async function fetchSelectedProject() {
+  const pid = getSelectedProjectId();
+  if (!pid) { updateProjectUI(); return; }
+  try {
+    const res = await fetch("/api/projects/"+pid, { headers: authHeaders() });
+    if (!res.ok) throw new Error();
+    const p = await res.json();
+    selectedProject = p;
+    updateProjectUI();
+    await refreshExplorer();
+  } catch (e) {
+    // stale id
+    setSelectedProjectId(null);
+    selectedProject = null;
+    updateProjectUI();
+  }
+}
+async function refreshExplorer() {
+  if (!selectedProject || !explorerTree) return;
+  explorerTree.innerHTML = '<div style="padding:8px;color:var(--text-2);font-size:12px">Loading…</div>';
+  try {
+    const res = await fetch("/api/projects/"+selectedProject.id+"/tree", { headers: authHeaders() });
+    if (!res.ok) throw new Error("Failed");
+    const data = await res.json();
+    renderTree(data.tree || [], explorerTree, "");
+  } catch (e) {
+    explorerTree.innerHTML = '<div style="padding:8px;color:#ef4444;font-size:12px">'+escapeHtml(e.message)+'</div>';
+  }
+}
+function renderTree(nodes, container, prefix) {
+  if (!container) return;
+  container.innerHTML = "";
+  if (!nodes.length) { container.innerHTML = '<div style="padding:8px;color:var(--text-2);font-size:12px">Empty project</div>'; return; }
+  function addNodes(list, parent) {
+    list.forEach((n)=>{
+      const row = document.createElement("div");
+      row.className = "explorer-item " + n.type;
+      row.textContent = (n.type==="dir" ? "📁 " : "📄 ") + n.name;
+      row.title = n.path;
+      if (n.type==="file") {
+        row.addEventListener("click", async ()=>{
+          try {
+            const r = await fetch("/api/projects/"+selectedProject.id+"/file?path="+encodeURIComponent(n.path), { headers: authHeaders() });
+            if (!r.ok) throw new Error("Failed");
+            const d = await r.json();
+            // Show file content as a tool card in agent messages
+            hideAgentEmpty();
+            const wrap = document.createElement("div");
+            wrap.className = "agent-tool";
+            wrap.innerHTML = '<div class="agent-tool-head"><span class="tool-name">📄 '+escapeHtml(n.path)+'</span><span class="tool-status ok">'+d.size+' bytes</span></div><div class="agent-tool-body">'+escapeHtml(d.content.slice(0,8000))+'</div>';
+            agentMessages.appendChild(wrap);
+            scrollAgentBottom();
+          } catch(e){ toast(e.message); }
+        });
+      }
+      parent.appendChild(row);
+      if (n.children && n.children.length) {
+        const sub = document.createElement("div");
+        sub.style.paddingLeft = "14px";
+        addNodes(n.children, sub);
+        parent.appendChild(sub);
+      }
+    });
+  }
+  addNodes(nodes, container);
+}
+
+// Patch sendAgent to include projectId and guard
+const _origSendAgent = sendAgent;
+sendAgent = async function(text) {
+  const msg = (text || agentInput.value || "").trim();
+  if (!msg) return;
+  if (!selectedProject) {
+    toast("Select a project first");
+    openProjectSelector();
+    return;
+  }
+  // delegate to original but with project context — we override fetch inside _orig
+  // Instead call the original logic with projectId via closure: set a temp
+  const prev = agentSessionId;
+  // The original sendAgent reads selectedProject via closure if we patch its fetch?
+  // We'll just call a wrapper that injects projectId
+  // Re-implement quick: call original but intercept its payload creation
+  // Easiest: directly implement here similar to original but with projectId
+  if (agentBusy) return;
+  agentBusy = true;
+  if (agentSend) agentSend.disabled = true;
+  if (agentStopBtn) agentStopBtn.hidden = false;
+  setAgentStatus("working");
+  appendAgentBubble("user", escapeHtml(msg));
+  if (agentInput) { agentInput.value=""; agentAutoResize(); }
+  agentController = new AbortController();
+  const payload = { message: msg, mode: agentMode, sessionId: agentSessionId || undefined, projectId: selectedProject.id };
+  const pendingTools = new Map();
+  try {
+    const res = await fetch("/api/agent/stream", { method:"POST", headers: authHeaders(), body: JSON.stringify(payload), signal: agentController.signal });
+    if (!res.ok) { const err=await res.json().catch(()=>({detail:"Request failed"})); throw new Error(err.detail||"Agent request failed"); }
+    const sid=res.headers.get("X-Agent-Session-Id");
+    if (sid) { agentSessionId=sid; localStorage.setItem("spike_agent_session", sid); }
+    const reader=res.body.getReader(); const decoder=new TextDecoder(); let buffer="";
+    while(true){ const{value,done}=await reader.read(); if(done) break; buffer+=decoder.decode(value,{stream:true}); let nl; while((nl=buffer.indexOf("\n"))!==-1){ const line=buffer.slice(0,nl).trim(); buffer=buffer.slice(nl+1); if(!line) continue; let ev; try{ev=JSON.parse(line);}catch(e){continue;}
+      if(ev.type==="session_started"){ if(ev.sessionId){agentSessionId=ev.sessionId; localStorage.setItem("spike_agent_session",ev.sessionId);} loadAgentSessions(); }
+      else if(ev.type==="project_loaded"){ /* could show */ }
+      else if(ev.type==="thinking"){ setAgentStatus("thinking"); }
+      else if(ev.type==="tool_start"){ setAgentStatus("working"); const el=appendAgentTool(ev.tool, ev.input, "running"); pendingTools.set(ev.tool+JSON.stringify(ev.input), el); }
+      else if(ev.type==="tool_result"){ const key=ev.tool+JSON.stringify(ev.input||{}); let el=pendingTools.get(key); if(!el){ const tools=agentMessages.querySelectorAll('.agent-tool'); for(let i=tools.length-1;i>=0;i--) if(tools[i].dataset.tool===ev.tool){ el={wrap:tools[i], body:tools[i].querySelector(".agent-tool-body"), badge:tools[i].querySelector(".tool-status")}; break; } } if(el&&el.badge){ el.badge.textContent=ev.success?"✓ done":"✗ failed"; el.badge.className="tool-status "+(ev.success?"ok":"err"); } if(el&&el.body){ el.body.textContent=(ev.output||"").slice(0,6000); el.body.classList.remove("collapsed"); } }
+      else if(ev.type==="command_started"){ setAgentStatus("working"); }
+      else if(ev.type==="command_result"){ appendAgentTerminal(ev.command||"", ev.output||"", !!ev.success); }
+      else if(ev.type==="file_changed"){ appendAgentFileChange(ev.path); refreshExplorer(); }
+      else if(ev.type==="approval_required"){ appendAgentApproval(ev.tool, ev.input, ev.reason); }
+      else if(ev.type==="completed"){ appendAgentBubble("assistant", renderMarkdown(ev.content||"")); setAgentStatus("completed"); setTimeout(()=>setAgentStatus("ready"),1800); }
+      else if(ev.type==="error"){ appendAgentBubble("assistant", '<p style="color:#ef4444">⚠️ '+escapeHtml(ev.message||"Agent error")+'</p>'); setAgentStatus("error"); }
+      else if(ev.type==="session_ended"){ loadAgentSessions(); }
+    } }
+    if(buffer.trim()){ try{ const ev=JSON.parse(buffer.trim()); if(ev.type==="completed"&&ev.content) appendAgentBubble("assistant", renderMarkdown(ev.content)); }catch(e){} }
+  } catch(err){ if(err.name==="AbortError"){ appendAgentBubble("assistant", '<p style="color:var(--muted)"><em>Stopped by user.</em></p>'); setAgentStatus("ready"); } else { appendAgentBubble("assistant", '<p style="color:#ef4444">⚠️ '+escapeHtml(err.message||"Agent failed")+'</p>'); setAgentStatus("error"); } }
+  finally{ agentBusy=false; if(agentSend) agentSend.disabled=false; if(agentStopBtn) agentStopBtn.hidden=true; agentController=null; if(agentStatus&&agentStatus.textContent.includes("Thinking")) setAgentStatus("ready"); scrollAgentBottom(); refreshExplorer(); }
+};
+
+// Wiring for + menu and modals
+if (addChatBtn && addPopover) {
+  // Override previous click that showed chat view — now show popover
+  const old = addChatBtn.getAttribute("data-old-wired");
+  if (!old) {
+    // remove old listener that called showChatView — we added one earlier; replace by cloning
+    const clone = addChatBtn.cloneNode(true);
+    addChatBtn.parentNode.replaceChild(clone, addChatBtn);
+    // reassign var
+    const newAddBtn = document.getElementById("add-chat-btn");
+    newAddBtn.addEventListener("click", (e)=>{
+      e.stopPropagation();
+      addPopover.hidden = !addPopover.hidden;
+    });
+    document.addEventListener("click", (e)=>{
+      if (!addPopover.hidden && !addPopover.contains(e.target) && e.target!==newAddBtn) addPopover.hidden=true;
+    });
+    // keep reference for project wiring
+    window._newAddBtn = newAddBtn;
+  }
+}
+document.getElementById("add-project-btn")?.addEventListener("click", ()=>{ if(addPopover) addPopover.hidden=true; openProjectSelector(); });
+if (projectSelectorClose) projectSelectorClose.addEventListener("click", closeProjectSelector);
+if (projectSelectorBackdrop) projectSelectorBackdrop.addEventListener("click", closeProjectSelector);
+if (projectSearch) projectSearch.addEventListener("input", ()=> loadProjects(projectSearch.value.trim()));
+if (createProjectOpen) createProjectOpen.addEventListener("click", openCreateModal);
+if (createProjectClose) createProjectClose.addEventListener("click", closeCreateModal);
+if (createProjectBackdrop) createProjectBackdrop.addEventListener("click", closeCreateModal);
+document.getElementById("create-cancel")?.addEventListener("click", closeCreateModal);
+if (templateGrid) templateGrid.addEventListener("click", (e)=>{
+  const b=e.target.closest(".template-btn");
+  if(!b) return;
+  templateGrid.querySelectorAll(".template-btn").forEach(x=>x.classList.remove("active"));
+  b.classList.add("active");
+  selectedTemplate=b.dataset.template;
+});
+if (createProjectForm) createProjectForm.addEventListener("submit", async (e)=>{
+  e.preventDefault();
+  const name=cpName.value.trim();
+  if(!name) { toast("Project name required"); return; }
+  const desc=cpDesc.value.trim();
+  const btn=document.getElementById("create-submit");
+  if(btn) btn.disabled=true;
+  try {
+    const res=await fetch("/api/projects", { method:"POST", headers: authHeaders(), body: JSON.stringify({ name, description: desc, template: selectedTemplate }) });
+    if(res.status===401){ toast("Sign in to create projects"); showAuthScreen(true); return; }
+    if(!res.ok){ const err=await res.json().catch(()=>({detail:"Failed"})); throw new Error(err.detail||"Create failed"); }
+    const p=await res.json();
+    closeCreateModal();
+    await selectProject(p);
+    loadProjects();
+  } catch(err){ toast(err.message); }
+  finally{ if(btn) btn.disabled=false; }
+});
+if (projectBarMain) projectBarMain.addEventListener("click", openProjectSelector);
+if (projectChangeBtn) projectChangeBtn.addEventListener("click", openProjectSelector);
+if (sidebarProjectBtn) sidebarProjectBtn.addEventListener("click", openProjectSelector);
+if (explorerToggle) explorerToggle.addEventListener("click", ()=>{
+  if(fileExplorer) fileExplorer.hidden = !fileExplorer.hidden;
+  if(!fileExplorer.hidden) refreshExplorer();
+});
+if (explorerRefresh) explorerRefresh.addEventListener("click", refreshExplorer);
+
+// Init project on load (after auth)
+const _origInitProjects = fetchSelectedProject;
+// Hook into auth flow: after verifyAndEnter or guest, fetch project
+const _origEnterGuest2 = enterGuest;
+enterGuest = function(){ _origEnterGuest2.apply(this, arguments); fetchSelectedProject(); };
+const _origVerify = verifyAndEnter;
+verifyAndEnter = async function(t){ const r=await _origVerify.apply(this, arguments); await fetchSelectedProject(); return r; };
+// Also patch showAgentView to refresh explorer
+const _origShowAgentView = showAgentView;
+showAgentView = function(){ _origShowAgentView.apply(this, arguments); if(selectedProject) refreshExplorer(); };
+
 // Make New Chat and chat list return to chat view
 const origNewChat = newChat;
-newChat = function() { showChatView(); return origNewChat.apply(this, arguments); };
-if (addChatBtn) addChatBtn.addEventListener("click", showChatView);
 // Patch renderChatList click to show chat view
 const _renderChatList = renderChatList;
 renderChatList = function() {

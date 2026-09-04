@@ -9,6 +9,7 @@ class AgentRequest(BaseModel):
     mode: str = Field("build", description="plan or build")
     model: Optional[str] = None
     sessionId: Optional[str] = None
+    projectId: Optional[str] = Field(None, description="Project/workspace to operate in")
     forceApprove: bool = Field(False, description="Allow dangerous commands when true")
 
 

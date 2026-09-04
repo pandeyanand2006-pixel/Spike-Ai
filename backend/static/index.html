@@ -11,16 +11,22 @@
   <div class="app hidden">
     <!-- ============ Sidebar ============ -->
     <aside class="sidebar" id="sidebar">
-      <div class="newchat-row">
+      <div class="newchat-row" style="position:relative">
         <button class="new-chat-btn" id="new-chat-btn">
           <span class="icon">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>
           </span>
           New chat
         </button>
-        <button class="add-chat-btn" id="add-chat-btn" title="Add new chat">
+        <button class="add-chat-btn" id="add-chat-btn" title="Add project">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>
         </button>
+        <div class="add-popover" id="add-popover" hidden>
+          <button class="add-pop-item" id="add-project-btn">
+            <span class="add-pop-ico">📁</span>
+            <span><span class="add-pop-title">Project</span><small>Create or open a workspace</small></span>
+          </button>
+        </div>
       </div>
       <button class="agent-btn" id="agent-btn" title="Spike Agent — AI software engineer">
         <span class="agent-ico" aria-hidden="true">
@@ -35,6 +41,17 @@
         </span>
         <span class="agent-badge">✦</span>
       </button>
+      <div class="sidebar-project" id="sidebar-project" hidden>
+        <div class="sidebar-section-title" style="padding-bottom:4px">PROJECT</div>
+        <button class="sidebar-project-btn" id="sidebar-project-btn" title="Select project">
+          <span class="sidebar-project-ico">📁</span>
+          <span class="sidebar-project-info">
+            <span class="sidebar-project-name" id="sidebar-project-name">No project</span>
+            <span class="sidebar-project-stack" id="sidebar-project-stack"></span>
+          </span>
+          <span class="sidebar-project-arrow">›</span>
+        </button>
+      </div>
       <div class="sidebar-section-title" id="chats-title">Chats</div>
       <nav class="chat-list" id="chat-list"></nav>
       <div class="agent-sessions" id="agent-sessions" hidden>
@@ -166,31 +183,104 @@
             <button class="agent-stop-btn" id="agent-stop" hidden title="Stop agent">Stop</button>
           </div>
         </div>
-        <div class="agent-messages" id="agent-messages">
-          <div class="agent-empty" id="agent-empty">
-            <div class="agent-empty-ico">✦</div>
-            <h2>Spike Agent</h2>
-            <p class="agent-empty-sub">Your AI software engineer. Ask me to build, fix, analyze, or refactor.</p>
-            <div class="agent-suggestions">
-              <button class="agent-sg" data-prompt="Analyze my project and give me a high-level overview.">Analyze my project</button>
-              <button class="agent-sg" data-prompt="Find all errors in this project and fix them.">Find and fix errors</button>
-              <button class="agent-sg" data-prompt="Create a new file hello.py that prints 'Hello Spike' and verify it works.">Create hello.py</button>
-              <button class="agent-sg" data-prompt="Run the tests and fix any failing tests.">Run tests</button>
-            </div>
+        <div class="project-bar" id="project-bar">
+          <button class="project-bar-main" id="project-bar-main" title="Select project">
+            <span class="project-bar-ico">📁</span>
+            <span class="project-bar-text">
+              <span class="project-bar-name" id="project-bar-name">Select a project</span>
+              <span class="project-bar-stack" id="project-bar-stack">Choose a workspace for Spike Agent</span>
+            </span>
+          </button>
+          <div class="project-bar-actions">
+            <button class="project-bar-change" id="project-change">Change</button>
+            <button class="project-bar-explorer-toggle" id="explorer-toggle" title="Toggle file explorer" hidden>☰ Files</button>
           </div>
         </div>
-        <div class="agent-input-area">
-          <form class="agent-input-form" id="agent-form" autocomplete="off">
-            <textarea id="agent-input" rows="1" placeholder="Ask Spike Agent to build, fix, analyze…"></textarea>
-            <button type="submit" class="agent-send" id="agent-send" title="Send to agent">
-              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M3.4 20.4 21.85 12 3.4 3.6 3.39 10l13 2-13 2z"/></svg>
-            </button>
-          </form>
-          <p class="disclaimer">Agent runs tools inside your workspace. Review changes before deploying.</p>
+        <div class="agent-layout">
+          <aside class="file-explorer" id="file-explorer" hidden>
+            <div class="explorer-head">
+              <span>PROJECT</span>
+              <button class="explorer-refresh" id="explorer-refresh" title="Refresh">↻</button>
+            </div>
+            <div class="explorer-tree" id="explorer-tree"></div>
+          </aside>
+          <div class="agent-main">
+            <div class="agent-messages" id="agent-messages">
+              <div class="agent-empty" id="agent-empty">
+                <div class="agent-empty-ico">✦</div>
+                <h2>Spike Agent</h2>
+                <p class="agent-empty-sub">Your AI software engineer. Ask me to build, fix, analyze, or refactor.</p>
+                <div class="agent-suggestions">
+                  <button class="agent-sg" data-prompt="Analyze my project and give me a high-level overview.">Analyze my project</button>
+                  <button class="agent-sg" data-prompt="Find all errors in this project and fix them.">Find and fix errors</button>
+                  <button class="agent-sg" data-prompt="Create a new file hello.py that prints 'Hello Spike' and verify it works.">Create hello.py</button>
+                  <button class="agent-sg" data-prompt="Run the tests and fix any failing tests.">Run tests</button>
+                </div>
+              </div>
+            </div>
+            <div class="agent-input-area">
+              <form class="agent-input-form" id="agent-form" autocomplete="off">
+                <textarea id="agent-input" rows="1" placeholder="Ask Spike Agent to build, fix, analyze…"></textarea>
+                <button type="submit" class="agent-send" id="agent-send" title="Send to agent">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M3.4 20.4 21.85 12 3.4 3.6 3.39 10l13 2-13 2z"/></svg>
+                </button>
+              </form>
+              <p class="disclaimer">Agent runs tools inside your workspace. Review changes before deploying.</p>
+            </div>
+          </div>
         </div>
       </div>
     </section>
     <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+
+    <!-- Project selector -->
+    <div class="modal" id="project-selector" hidden>
+      <div class="modal-backdrop" id="project-selector-backdrop"></div>
+      <div class="modal-panel project-selector-panel">
+        <div class="modal-head">
+          <h3>Select Project</h3>
+          <button class="modal-close" id="project-selector-close" aria-label="Close">×</button>
+        </div>
+        <div class="modal-body">
+          <input class="project-search" id="project-search" type="text" placeholder="Search projects…" autocomplete="off" />
+          <div class="project-list" id="project-list"></div>
+          <button class="create-project-open" id="create-project-open">+ Create New Project</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Create project -->
+    <div class="modal" id="create-project-modal" hidden>
+      <div class="modal-backdrop" id="create-project-backdrop"></div>
+      <div class="modal-panel">
+        <div class="modal-head">
+          <h3>Create New Project</h3>
+          <button class="modal-close" id="create-project-close" aria-label="Close">×</button>
+        </div>
+        <form class="modal-body" id="create-project-form">
+          <label class="modal-label">Project name
+            <input id="cp-name" type="text" placeholder="My New Project" required maxlength="80" autocomplete="off" />
+          </label>
+          <label class="modal-label">Description <small style="font-weight:400;color:var(--text-2)">(optional)</small>
+            <input id="cp-desc" type="text" placeholder="A short description" maxlength="300" autocomplete="off" />
+          </label>
+          <div class="modal-label">Template</div>
+          <div class="template-grid" id="template-grid">
+            <button type="button" class="template-btn active" data-template="other">Other</button>
+            <button type="button" class="template-btn" data-template="react">React</button>
+            <button type="button" class="template-btn" data-template="nextjs">Next.js</button>
+            <button type="button" class="template-btn" data-template="node">Node.js</button>
+            <button type="button" class="template-btn" data-template="python">Python</button>
+            <button type="button" class="template-btn" data-template="fastapi">FastAPI</button>
+            <button type="button" class="template-btn" data-template="html">HTML</button>
+          </div>
+          <div class="modal-actions">
+            <button type="button" class="btn-cancel" id="create-cancel">Cancel</button>
+            <button type="submit" class="btn-create" id="create-submit">Create Project</button>
+          </div>
+        </form>
+      </div>
+    </div>
   </div>
 
   <div class="voice-orb" id="voice-orb" hidden>
