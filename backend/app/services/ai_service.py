@@ -148,6 +148,8 @@ class AIService:
             except Exception as e:  # try next model
                 last_err = str(e)
         return ""
+
+    async def outline_presentation(self, topic: str, slides: int = 6):
         """Use the LLM to produce a structured presentation outline as JSON."""
         sys = (
             "You are a presentation designer. Given a topic, return ONLY valid JSON: "

@@ -1739,4 +1739,382 @@ async function refreshAuthConfig() {
     if (sgImage) sgImage.style.display = showImage ? "" : "none";
   } catch (e) { /* leave defaults */ }
 }
+
+/* ============================================================
+   Spike Agent — AI software engineer (Plan / Build)
+   ============================================================ */
+const agentBtn = document.getElementById("agent-btn");
+const chatView = document.getElementById("chat-view");
+const agentView = document.getElementById("agent-view");
+const agentMessages = document.getElementById("agent-messages");
+const agentEmpty = document.getElementById("agent-empty");
+const agentForm = document.getElementById("agent-form");
+const agentInput = document.getElementById("agent-input");
+const agentSend = document.getElementById("agent-send");
+const agentStatus = document.getElementById("agent-status");
+const agentModeEl = document.getElementById("agent-mode");
+const agentStopBtn = document.getElementById("agent-stop");
+const agentList = document.getElementById("agent-list");
+const agentSessionsWrap = document.getElementById("agent-sessions");
+
+let agentMode = localStorage.getItem("spike_agent_mode") || "build";
+let agentSessionId = localStorage.getItem("spike_agent_session") || null;
+let agentBusy = false;
+let agentController = null;
+
+function setAgentMode(m) {
+  agentMode = m === "plan" ? "plan" : "build";
+  localStorage.setItem("spike_agent_mode", agentMode);
+  if (agentModeEl) {
+    agentModeEl.querySelectorAll(".agent-mode-btn").forEach((b) => {
+      const on = b.dataset.mode === agentMode;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-selected", on ? "true" : "false");
+    });
+  }
+}
+function setAgentStatus(state) {
+  if (!agentStatus) return;
+  const dot = agentStatus.querySelector(".agent-dot");
+  agentStatus.classList.remove("working", "error");
+  if (state === "working") {
+    agentStatus.classList.add("working");
+    agentStatus.innerHTML = '<span class="agent-dot"></span> Working';
+  } else if (state === "thinking") {
+    agentStatus.classList.add("working");
+    agentStatus.innerHTML = '<span class="agent-dot"></span> Thinking';
+  } else if (state === "error") {
+    agentStatus.classList.add("error");
+    agentStatus.innerHTML = '<span class="agent-dot"></span> Error';
+  } else if (state === "completed") {
+    agentStatus.innerHTML = '<span class="agent-dot"></span> Completed';
+  } else {
+    agentStatus.innerHTML = '<span class="agent-dot"></span> Ready';
+  }
+}
+function showChatView() {
+  if (chatView) chatView.hidden = false;
+  if (agentView) agentView.hidden = true;
+  if (agentBtn) agentBtn.classList.remove("active");
+  document.getElementById("chat-header")?.classList.remove("hidden");
+  if (window.innerWidth <= 860) {
+    sidebar.classList.remove("open");
+    if (sidebarBackdrop) sidebarBackdrop.classList.remove("show");
+  }
+}
+function showAgentView() {
+  if (chatView) chatView.hidden = true;
+  if (agentView) agentView.hidden = false;
+  if (agentBtn) agentBtn.classList.add("active");
+  // deselect chat active state visually
+  chatListEl.querySelectorAll(".chat-item.active").forEach((el) => el.classList.remove("active"));
+  if (window.innerWidth <= 860) {
+    sidebar.classList.remove("open");
+    if (sidebarBackdrop) sidebarBackdrop.classList.remove("show");
+  }
+  setTimeout(() => { if (agentInput) agentInput.focus(); }, 80);
+  loadAgentSessions();
+}
+
+function scrollAgentBottom() {
+  if (!agentMessages) return;
+  requestAnimationFrame(() => { agentMessages.scrollTop = agentMessages.scrollHeight; });
+}
+function hideAgentEmpty() {
+  if (agentEmpty) agentEmpty.style.display = "none";
+}
+function appendAgentBubble(role, html) {
+  hideAgentEmpty();
+  const wrap = document.createElement("div");
+  wrap.className = "agent-msg " + role;
+  const lbl = document.createElement("div");
+  lbl.className = "agent-role";
+  lbl.textContent = role === "user" ? "You" : "Spike Agent";
+  const bubble = document.createElement("div");
+  bubble.className = "agent-bubble";
+  if (typeof html === "string" && html.startsWith("<")) bubble.innerHTML = html;
+  else bubble.textContent = html;
+  wrap.appendChild(lbl);
+  wrap.appendChild(bubble);
+  agentMessages.appendChild(wrap);
+  scrollAgentBottom();
+  return bubble;
+}
+function appendAgentTool(tool, input, status) {
+  hideAgentEmpty();
+  const wrap = document.createElement("div");
+  wrap.className = "agent-tool";
+  wrap.dataset.tool = tool;
+  const head = document.createElement("div");
+  head.className = "agent-tool-head";
+  const name = document.createElement("span");
+  name.className = "tool-name";
+  const icons = { read_file:"📄", write_file:"✏️", edit_file:"🔧", delete_file:"🗑️", list_directory:"📁", search_files:"🔍", get_file_info:"ℹ️", inspect_project:"🧭", run_command:"💻" };
+  name.textContent = (icons[tool]||"⚡")+" "+tool;
+  const badge = document.createElement("span");
+  badge.className = "tool-status " + (status||"running");
+  badge.textContent = status==="ok" ? "✓ done" : status==="err" ? "✗ failed" : "… running";
+  head.appendChild(name); head.appendChild(badge);
+  const body = document.createElement("div");
+  body.className = "agent-tool-body";
+  body.textContent = JSON.stringify(input, null, 2);
+  head.addEventListener("click", () => body.classList.toggle("collapsed"));
+  wrap.appendChild(head); wrap.appendChild(body);
+  agentMessages.appendChild(wrap);
+  scrollAgentBottom();
+  return { wrap, body, badge, head };
+}
+function appendAgentTerminal(cmd, output, success) {
+  hideAgentEmpty();
+  const wrap = document.createElement("div");
+  wrap.className = "agent-tool";
+  const head = document.createElement("div");
+  head.className = "agent-tool-head";
+  head.innerHTML = '<span class="tool-name">💻 run_command</span><span class="tool-status '+(success?"ok":"err")+'">'+(success?"✓ done":"✗ failed")+'</span>';
+  const body = document.createElement("div");
+  body.className = "terminal-block";
+  body.textContent = "$ "+cmd+"\n"+(output||"(no output)");
+  head.addEventListener("click", () => body.classList.toggle("collapsed"));
+  wrap.appendChild(head); wrap.appendChild(body);
+  agentMessages.appendChild(wrap);
+  scrollAgentBottom();
+}
+function appendAgentApproval(tool, input, reason) {
+  hideAgentEmpty();
+  const wrap = document.createElement("div");
+  wrap.className = "agent-approval";
+  wrap.innerHTML = '<p><strong>⚠ Approval required</strong></p><p>'+escapeHtml(reason||"This action needs confirmation.")+'</p><p><code>'+escapeHtml(tool)+' '+escapeHtml(JSON.stringify(input))+'</code></p>';
+  const actions = document.createElement("div");
+  actions.className = "agent-approval-actions";
+  const allow = document.createElement("button"); allow.className="approval-btn allow"; allow.textContent="Allow";
+  const cancel = document.createElement("button"); cancel.className="approval-btn cancel"; cancel.textContent="Cancel";
+  allow.addEventListener("click", () => { wrap.remove(); toast("Approved — retry the task or send 'allow'"); });
+  cancel.addEventListener("click", () => { wrap.remove(); toast("Cancelled"); });
+  actions.appendChild(allow); actions.appendChild(cancel);
+  wrap.appendChild(actions);
+  agentMessages.appendChild(wrap);
+  scrollAgentBottom();
+}
+function appendAgentFileChange(path) {
+  hideAgentEmpty();
+  const el = document.createElement("div");
+  el.className = "agent-file-change";
+  el.textContent = "✓ "+ path + " updated";
+  agentMessages.appendChild(el);
+  scrollAgentBottom();
+}
+
+function agentAutoResize() {
+  if (!agentInput) return;
+  agentInput.style.height = "auto";
+  agentInput.style.height = Math.min(agentInput.scrollHeight, 160) + "px";
+}
+
+async function loadAgentSessions() {
+  if (!agentList) return;
+  try {
+    const res = await fetch("/api/agent/sessions", { headers: authHeaders() });
+    if (!res.ok) return;
+    const items = await res.json();
+    agentList.innerHTML = "";
+    if (!items.length) {
+      if (agentSessionsWrap) agentSessionsWrap.hidden = true;
+      return;
+    }
+    if (agentSessionsWrap) agentSessionsWrap.hidden = false;
+    items.slice(0, 20).forEach((s) => {
+      const el = document.createElement("div");
+      el.className = "chat-item" + (s.id === agentSessionId ? " active" : "");
+      el.innerHTML = '<span class="chat-name">'+escapeHtml(s.title||"Agent Session")+'</span>';
+      el.addEventListener("click", async () => {
+        agentSessionId = s.id;
+        localStorage.setItem("spike_agent_session", agentSessionId);
+        showAgentView();
+        // load full history
+        try {
+          const r = await fetch("/api/agent/sessions/"+s.id, { headers: authHeaders() });
+          if (!r.ok) return;
+          const d = await r.json();
+          agentMessages.querySelectorAll(".agent-msg, .agent-tool, .agent-approval, .agent-file-change, .terminal-block").forEach((x)=>x.remove());
+          if (agentEmpty) agentEmpty.style.display = "";
+          (d.messages||[]).forEach((m)=>{
+            if (m.role==="user") appendAgentBubble("user", escapeHtml(m.content));
+            else if (m.role==="assistant") {
+              const div=document.createElement("div"); div.className="agent-msg assistant";
+              const lbl=document.createElement("div"); lbl.className="agent-role"; lbl.textContent="Spike Agent";
+              const bub=document.createElement("div"); bub.className="agent-bubble";
+              bub.innerHTML = renderMarkdown(m.content);
+              div.appendChild(lbl); div.appendChild(bub); agentMessages.appendChild(div);
+            }
+          });
+          (d.toolEvents||[]).forEach((ev)=>{
+            if (ev.type==="tool_start") appendAgentTool(ev.tool, ev.input, "running");
+          });
+          hideAgentEmpty();
+        } catch(e){}
+      });
+      agentList.appendChild(el);
+    });
+  } catch(e){}
+}
+
+async function sendAgent(text) {
+  const msg = (text || agentInput.value || "").trim();
+  if (!msg || agentBusy) return;
+  agentBusy = true;
+  if (agentSend) agentSend.disabled = true;
+  if (agentStopBtn) agentStopBtn.hidden = false;
+  setAgentStatus("working");
+  appendAgentBubble("user", escapeHtml(msg));
+  if (agentInput) { agentInput.value=""; agentAutoResize(); }
+
+  agentController = new AbortController();
+  const payload = { message: msg, mode: agentMode, sessionId: agentSessionId || undefined };
+  const pendingTools = new Map(); // tool -> element
+
+  try {
+    const res = await fetch("/api/agent/stream", {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify(payload),
+      signal: agentController.signal,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(()=>({detail:"Request failed"}));
+      throw new Error(err.detail || "Agent request failed");
+    }
+    const sid = res.headers.get("X-Agent-Session-Id");
+    if (sid) { agentSessionId = sid; localStorage.setItem("spike_agent_session", sid); }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let finalContent = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl+1);
+        if (!line) continue;
+        let ev;
+        try { ev = JSON.parse(line); } catch(e){ continue; }
+        if (ev.type === "session_started") {
+          if (ev.sessionId) { agentSessionId = ev.sessionId; localStorage.setItem("spike_agent_session", ev.sessionId); }
+          loadAgentSessions();
+        } else if (ev.type === "thinking") {
+          setAgentStatus("thinking");
+        } else if (ev.type === "tool_start") {
+          setAgentStatus("working");
+          const el = appendAgentTool(ev.tool, ev.input, "running");
+          pendingTools.set(ev.tool + JSON.stringify(ev.input), el);
+        } else if (ev.type === "tool_result") {
+          // update last matching tool
+          const key = ev.tool + JSON.stringify(ev.input || {});
+          let el = pendingTools.get(key);
+          // fallback: find last running tool with same name
+          if (!el) {
+            const tools = agentMessages.querySelectorAll('.agent-tool');
+            for (let i=tools.length-1;i>=0;i--) if (tools[i].dataset.tool===ev.tool) { el = { wrap: tools[i], body: tools[i].querySelector(".agent-tool-body"), badge: tools[i].querySelector(".tool-status") }; break; }
+          }
+          if (el && el.badge) {
+            el.badge.textContent = ev.success ? "✓ done" : "✗ failed";
+            el.badge.className = "tool-status " + (ev.success ? "ok" : "err");
+          }
+          if (el && el.body) {
+            el.body.textContent = (ev.output || "").slice(0, 6000);
+            el.body.classList.remove("collapsed");
+          }
+        } else if (ev.type === "command_started") {
+          setAgentStatus("working");
+        } else if (ev.type === "command_result") {
+          appendAgentTerminal(ev.command || "", ev.output || "", !!ev.success);
+        } else if (ev.type === "file_changed") {
+          appendAgentFileChange(ev.path);
+        } else if (ev.type === "approval_required") {
+          appendAgentApproval(ev.tool, ev.input, ev.reason);
+        } else if (ev.type === "completed") {
+          finalContent = ev.content || "";
+          const html = renderMarkdown(finalContent);
+          appendAgentBubble("assistant", html);
+          setAgentStatus("completed");
+          setTimeout(()=>setAgentStatus("ready"), 1800);
+        } else if (ev.type === "error") {
+          appendAgentBubble("assistant", '<p style="color:#ef4444">⚠️ '+escapeHtml(ev.message||"Agent error")+'</p>');
+          setAgentStatus("error");
+        } else if (ev.type === "session_ended") {
+          loadAgentSessions();
+        }
+      }
+    }
+    if (buffer.trim()) {
+      try {
+        const ev = JSON.parse(buffer.trim());
+        if (ev.type==="completed" && ev.content) {
+          appendAgentBubble("assistant", renderMarkdown(ev.content));
+        }
+      } catch(e){}
+    }
+  } catch (err) {
+    if (err.name === "AbortError") {
+      appendAgentBubble("assistant", '<p style="color:var(--muted)"><em>Stopped by user.</em></p>');
+      setAgentStatus("ready");
+    } else {
+      appendAgentBubble("assistant", '<p style="color:#ef4444">⚠️ '+escapeHtml(err.message||"Agent failed")+'</p>');
+      setAgentStatus("error");
+    }
+  } finally {
+    agentBusy = false;
+    if (agentSend) agentSend.disabled = false;
+    if (agentStopBtn) agentStopBtn.hidden = true;
+    agentController = null;
+    if (agentStatus && agentStatus.textContent.includes("Thinking")) setAgentStatus("ready");
+    scrollAgentBottom();
+  }
+}
+
+// Wiring
+if (agentBtn) agentBtn.addEventListener("click", showAgentView);
+if (agentModeEl) agentModeEl.addEventListener("click", (e)=>{
+  const b=e.target.closest(".agent-mode-btn");
+  if (!b) return;
+  setAgentMode(b.dataset.mode);
+});
+if (agentStopBtn) agentStopBtn.addEventListener("click", ()=>{
+  if (agentController) agentController.abort();
+});
+if (agentForm) agentForm.addEventListener("submit", (e)=>{ e.preventDefault(); sendAgent(); });
+if (agentInput) {
+  agentInput.addEventListener("input", agentAutoResize);
+  agentInput.addEventListener("keydown", (e)=>{
+    if (e.key==="Enter" && !e.shiftKey) { e.preventDefault(); sendAgent(); }
+  });
+}
+document.querySelectorAll(".agent-sg").forEach((b)=>{
+  b.addEventListener("click", ()=> sendAgent(b.dataset.prompt));
+});
+// Make New Chat and chat list return to chat view
+const origNewChat = newChat;
+newChat = function() { showChatView(); return origNewChat.apply(this, arguments); };
+if (addChatBtn) addChatBtn.addEventListener("click", showChatView);
+// Patch renderChatList click to show chat view
+const _renderChatList = renderChatList;
+renderChatList = function() {
+  const r=_renderChatList.apply(this, arguments);
+  // ensure agent button not active when chat view
+  // (active state managed by showChatView/showAgentView)
+  return r;
+};
+// Override chat item click to show chat view (via capturing after render)
+const _oldRenderChatList = renderChatList;
+// We monkey-patch after each render: chat items already switch active; also ensure view
+// Do it via event delegation on chatListEl
+if (chatListEl) chatListEl.addEventListener("click", (e)=>{
+  if (e.target.closest(".chat-item")) showChatView();
+});
+
+setAgentMode(agentMode);
 init();

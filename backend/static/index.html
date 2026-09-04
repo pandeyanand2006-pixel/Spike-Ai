@@ -22,8 +22,25 @@
           <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>
         </button>
       </div>
-      <div class="sidebar-section-title">Chats</div>
+      <button class="agent-btn" id="agent-btn" title="Spike Agent — AI software engineer">
+        <span class="agent-ico" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2.5l1.7 4.2 4.4.6-3.2 3 0.8 4.4L12 12.9l-3.7 1.8.8-4.4-3.2-3 4.4-.6z"/>
+            <path d="M5 16l1.1 2.2 2.3.3-1.7 1.6.4 2.3L5 21.3l-2.1 1.1.4-2.3L1.6 18.5l2.3-.3z" opacity="0.7"/>
+          </svg>
+        </span>
+        <span class="agent-label">
+          <span class="agent-title">Spike Agent</span>
+          <span class="agent-sub">Build with AI</span>
+        </span>
+        <span class="agent-badge">✦</span>
+      </button>
+      <div class="sidebar-section-title" id="chats-title">Chats</div>
       <nav class="chat-list" id="chat-list"></nav>
+      <div class="agent-sessions" id="agent-sessions" hidden>
+        <div class="sidebar-section-title">Agent sessions</div>
+        <nav class="chat-list" id="agent-list"></nav>
+      </div>
       <div class="sidebar-footer">
         <span class="status" id="status" title="Online"></span>
         <div class="account-area" id="account-area" hidden>
@@ -41,7 +58,7 @@
 
     <!-- ============ Main ============ -->
     <section class="main">
-      <header class="chat-header">
+      <header class="chat-header" id="chat-header">
         <button class="icon-btn toggle-sidebar" id="toggle-sidebar" title="Toggle sidebar">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M3 6h18v2H3zM3 11h18v2H3zM3 16h18v2H3z"/></svg>
         </button>
@@ -71,67 +88,106 @@
         </div>
       </header>
 
-      <!-- ============ Messages ============ -->
-      <main class="messages" id="messages">
-        <div class="msg-container">
-          <div class="empty-state" id="empty-state">
-            <img src="/static/logo.svg" alt="logo" class="empty-logo" />
-            <h2>How can I help you today?</h2>
-            <p class="sub">Your personal AI assistant powered by Groq</p>
-            <div class="suggestions">
-              <button class="suggestion"><span class="sg-ico">&#128218;</span>Explain how a chatbot works</button>
-              <button class="suggestion"><span class="sg-ico">&#128736;&#65039;</span>Help me plan a project</button>
-              <button class="suggestion"><span class="sg-ico">&#128187;</span>Write a Python function</button>
-              <button class="suggestion" id="sg-image"><span class="sg-ico">&#127912;</span>Generate an image of a futuristic city</button>
-              <button class="suggestion"><span class="sg-ico">&#128221;</span>Proofread my text</button>
+      <!-- ============ Chat view ============ -->
+      <div class="view" id="chat-view">
+        <main class="messages" id="messages">
+          <div class="msg-container">
+            <div class="empty-state" id="empty-state">
+              <img src="/static/logo.svg" alt="logo" class="empty-logo" />
+              <h2>How can I help you today?</h2>
+              <p class="sub">Your personal AI assistant powered by Groq</p>
+              <div class="suggestions">
+                <button class="suggestion"><span class="sg-ico">&#128218;</span>Explain how a chatbot works</button>
+                <button class="suggestion"><span class="sg-ico">&#128736;&#65039;</span>Help me plan a project</button>
+                <button class="suggestion"><span class="sg-ico">&#128187;</span>Write a Python function</button>
+                <button class="suggestion" id="sg-image"><span class="sg-ico">&#127912;</span>Generate an image of a futuristic city</button>
+                <button class="suggestion"><span class="sg-ico">&#128221;</span>Proofread my text</button>
+              </div>
+            </div>
+          </div>
+        </main>
+        <button class="scroll-fab" id="scroll-fab" title="Scroll to bottom">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M7 10l5 5 5-5z"/></svg>
+        </button>
+        <div class="input-area">
+          <form class="input-form" id="input-form" autocomplete="off">
+            <button type="button" class="plus-btn" id="plus-btn" title="Tools" aria-label="Tools">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg>
+            </button>
+            <textarea id="input" rows="1" placeholder="Message Spike…"></textarea>
+            <button type="button" class="voice-assist-btn" id="voice-assist-btn" title="AI Voice Assistant — tap to talk" aria-label="AI Voice Assistant">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true">
+                <rect x="4" y="10" width="3" height="4" rx="1.2"/>
+                <rect x="10.5" y="6" width="3" height="12" rx="1.2"/>
+                <rect x="17" y="9" width="3" height="6" rx="1.2"/>
+              </svg>
+            </button>
+            <button type="button" class="mic-btn" id="mic-btn" title="Voice input" aria-label="Voice input">
+              <svg class="mic-ico" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                <path class="mic-body" d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3z"/>
+                <path class="mic-stand" d="M5 11a7 7 0 0 0 14 0h-2a5 5 0 0 1-10 0z"/>
+              </svg>
+            </button>
+            <button type="button" class="send-btn" id="send-btn" title="Send">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M3.4 20.4 21.85 12 3.4 3.6 3.39 10l13 2-13 2z"/></svg>
+            </button>
+            <input type="file" id="img-input" accept="image/*" hidden />
+            <div class="tools-popover" id="tools-popover" hidden>
+              <button type="button" class="pop-item" id="pop-attach">
+                <span class="pop-ico">📎</span><span>Attach image<small>Let Spike see &amp; understand it</small></span>
+              </button>
+              <button type="button" class="pop-item" id="pop-image">
+                <span class="pop-ico">🎨</span><span>Generate image<small>Create from a text prompt</small></span>
+              </button>
+              <button type="button" class="pop-item" id="pop-ppt">
+                <span class="pop-ico">📊</span><span>Make a PPT<small>Slide deck + PDF to download</small></span>
+              </button>
+            </div>
+          </form>
+          <p class="disclaimer">Spike can make mistakes. Check important info.</p>
+        </div>
+      </div>
+
+      <!-- ============ Agent view ============ -->
+      <div class="view" id="agent-view" hidden>
+        <div class="agent-header">
+          <div class="agent-header-left">
+            <span class="agent-header-ico">✦</span>
+            <div class="agent-header-text">
+              <span class="agent-header-title">Spike Agent</span>
+              <span class="agent-header-status" id="agent-status"><span class="agent-dot"></span> Ready</span>
+            </div>
+          </div>
+          <div class="agent-header-right">
+            <div class="agent-mode" id="agent-mode" role="tablist" aria-label="Agent mode">
+              <button class="agent-mode-btn active" data-mode="build" role="tab" aria-selected="true">Build</button>
+              <button class="agent-mode-btn" data-mode="plan" role="tab" aria-selected="false">Plan</button>
+            </div>
+            <button class="agent-stop-btn" id="agent-stop" hidden title="Stop agent">Stop</button>
+          </div>
+        </div>
+        <div class="agent-messages" id="agent-messages">
+          <div class="agent-empty" id="agent-empty">
+            <div class="agent-empty-ico">✦</div>
+            <h2>Spike Agent</h2>
+            <p class="agent-empty-sub">Your AI software engineer. Ask me to build, fix, analyze, or refactor.</p>
+            <div class="agent-suggestions">
+              <button class="agent-sg" data-prompt="Analyze my project and give me a high-level overview.">Analyze my project</button>
+              <button class="agent-sg" data-prompt="Find all errors in this project and fix them.">Find and fix errors</button>
+              <button class="agent-sg" data-prompt="Create a new file hello.py that prints 'Hello Spike' and verify it works.">Create hello.py</button>
+              <button class="agent-sg" data-prompt="Run the tests and fix any failing tests.">Run tests</button>
             </div>
           </div>
         </div>
-      </main>
-
-      <!-- scroll to bottom FAB -->
-      <button class="scroll-fab" id="scroll-fab" title="Scroll to bottom">
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M7 10l5 5 5-5z"/></svg>
-      </button>
-
-      <!-- ============ Input ============ -->
-      <div class="input-area">
-        <form class="input-form" id="input-form" autocomplete="off">
-          <button type="button" class="plus-btn" id="plus-btn" title="Tools" aria-label="Tools">
-            <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg>
-          </button>
-          <textarea id="input" rows="1" placeholder="Message Spike…"></textarea>
-          <button type="button" class="voice-assist-btn" id="voice-assist-btn" title="AI Voice Assistant — tap to talk" aria-label="AI Voice Assistant">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true">
-              <rect x="4" y="10" width="3" height="4" rx="1.2"/>
-              <rect x="10.5" y="6" width="3" height="12" rx="1.2"/>
-              <rect x="17" y="9" width="3" height="6" rx="1.2"/>
-            </svg>
-          </button>
-          <button type="button" class="mic-btn" id="mic-btn" title="Voice input" aria-label="Voice input">
-            <svg class="mic-ico" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-              <path class="mic-body" d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3z"/>
-              <path class="mic-stand" d="M5 11a7 7 0 0 0 14 0h-2a5 5 0 0 1-10 0z"/>
-            </svg>
-          </button>
-          <button type="button" class="send-btn" id="send-btn" title="Send">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M3.4 20.4 21.85 12 3.4 3.6 3.39 10l13 2-13 2z"/></svg>
-          </button>
-
-          <input type="file" id="img-input" accept="image/*" hidden />
-          <div class="tools-popover" id="tools-popover" hidden>
-            <button type="button" class="pop-item" id="pop-attach">
-              <span class="pop-ico">📎</span><span>Attach image<small>Let Spike see &amp; understand it</small></span>
+        <div class="agent-input-area">
+          <form class="agent-input-form" id="agent-form" autocomplete="off">
+            <textarea id="agent-input" rows="1" placeholder="Ask Spike Agent to build, fix, analyze…"></textarea>
+            <button type="submit" class="agent-send" id="agent-send" title="Send to agent">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M3.4 20.4 21.85 12 3.4 3.6 3.39 10l13 2-13 2z"/></svg>
             </button>
-            <button type="button" class="pop-item" id="pop-image">
-              <span class="pop-ico">🎨</span><span>Generate image<small>Create from a text prompt</small></span>
-            </button>
-            <button type="button" class="pop-item" id="pop-ppt">
-              <span class="pop-ico">📊</span><span>Make a PPT<small>Slide deck + PDF to download</small></span>
-            </button>
-          </div>
-        </form>
-        <p class="disclaimer">Spike can make mistakes. Check important info.</p>
+          </form>
+          <p class="disclaimer">Agent runs tools inside your workspace. Review changes before deploying.</p>
+        </div>
       </div>
     </section>
     <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
