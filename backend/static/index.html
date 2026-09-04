@@ -197,14 +197,11 @@
           </div>
         </div>
         <div class="agent-layout">
-          <aside class="file-explorer" id="file-explorer" hidden>
-            <div class="explorer-head">
-              <span>PROJECT</span>
-              <button class="explorer-refresh" id="explorer-refresh" title="Refresh">↻</button>
-            </div>
-            <div class="explorer-tree" id="explorer-tree"></div>
-          </aside>
           <div class="agent-main">
+            <div class="agent-todo" id="agent-todo" hidden>
+              <div class="agent-todo-head">Plan <span class="todo-progress" id="todo-progress">0/0</span></div>
+              <div class="todo-list" id="todo-list"></div>
+            </div>
             <div class="agent-messages" id="agent-messages">
               <div class="agent-empty" id="agent-empty">
                 <div class="agent-empty-ico">✦</div>
@@ -228,6 +225,13 @@
               <p class="disclaimer">Agent runs tools inside your workspace. Review changes before deploying.</p>
             </div>
           </div>
+          <aside class="file-explorer" id="file-explorer" hidden>
+            <div class="explorer-head">
+              <span>PROJECT FILES</span>
+              <button class="explorer-refresh" id="explorer-refresh" title="Refresh">↻</button>
+            </div>
+            <div class="explorer-tree" id="explorer-tree"></div>
+          </aside>
         </div>
       </div>
     </section>

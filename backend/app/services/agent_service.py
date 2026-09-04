@@ -56,6 +56,9 @@ Supported tools:
 - inspect_project {}
 - run_command {command, workdir, timeout}
 
+CRITICAL for write_file/edit_file: The "content" value MUST be a valid JSON string. Escape every double quote as \\" and every newline as \\n. Keep each file under 200 lines for this turn; for large websites, create the minimal viable version first, then expand in next steps. Example:
+{"tool": "write_file", "input": {"path": "package.json", "content": "{\\n  \\"name\\": \\"chax\\",\\n  \\"version\\": \\"1.0.0\\"\\n}"}}
+
 When you have completed the task, respond WITHOUT a tool call, with a concise summary including:
 ## Completed — what was done
 ### Changes — files created/edited
@@ -95,18 +98,14 @@ def parse_tool_call(text: str) -> Optional[Dict[str, Any]]:
     if not text:
         return None
     t = text.strip()
-    # Strip markdown fences if present
     t = re.sub(r"^```(?:json)?\s*", "", t, flags=re.I)
     t = re.sub(r"\s*```$", "", t, flags=re.I).strip()
-    # Try direct JSON
     try:
         obj = json.loads(t)
-        if isinstance(obj, dict) and "tool" in obj:
-            if obj["tool"] in TOOL_REGISTRY:
-                return {"tool": obj["tool"], "input": obj.get("input", {}) if isinstance(obj.get("input"), dict) else {}}
+        if isinstance(obj, dict) and "tool" in obj and obj["tool"] in TOOL_REGISTRY:
+            return {"tool": obj["tool"], "input": obj.get("input", {}) if isinstance(obj.get("input"), dict) else {}}
     except Exception:
         pass
-    # Search for JSON object inside text
     m = re.search(r"\{[^{}]*\"tool\"\s*:\s*\"[a-z_]+\"[^{}]*\}", t, re.S)
     if m:
         try:
@@ -115,9 +114,7 @@ def parse_tool_call(text: str) -> Optional[Dict[str, Any]]:
                 return {"tool": obj["tool"], "input": obj.get("input", {}) if isinstance(obj.get("input"), dict) else {}}
         except Exception:
             pass
-    # Multi-line JSON
     try:
-        # Find first { and last }
         start = t.find("{")
         end = t.rfind("}")
         if start != -1 and end != -1 and end > start:
@@ -126,6 +123,52 @@ def parse_tool_call(text: str) -> Optional[Dict[str, Any]]:
                 return {"tool": obj["tool"], "input": obj.get("input", {}) if isinstance(obj.get("input"), dict) else {}}
     except Exception:
         pass
+    return None
+
+
+def is_likely_tool_call(text: str) -> bool:
+    t = (text or "").strip()
+    return '"tool"' in t and '"input"' in t and t.lstrip().startswith("{")
+
+def try_fix_unescaped_write(text: str) -> Optional[Dict[str, Any]]:
+    """Fallback for write_file where content has unescaped quotes/newlines."""
+    try:
+        m_path = re.search(r'"path"\s*:\s*"([^"]+)"', text)
+        if not m_path:
+            return None
+        path = m_path.group(1)
+        # Find content start
+        m_start = re.search(r'"content"\s*:\s*"', text)
+        if not m_start:
+            return None
+        start = m_start.end()
+        # Try to find the closing of content: look for '",\s*}' or '"\s*}\s*}'
+        # Use rfind for last occurrence of '"\n}' or '"}'
+        remaining = text[start:]
+        # Try to parse as JSON string by wrapping remaining and using json decoder with raw
+        # Heuristic: find the last '}' that closes input, then outer '}'
+        # For truncated, just take up to 3000 chars
+        end = remaining.rfind('"}')
+        if end == -1:
+            end = remaining.rfind('" }')
+        if end != -1:
+            raw = remaining[:end]
+        else:
+            # Truncated — take up to next '}' or end
+            raw = remaining[:3000]
+            # Trim at last complete line
+            if raw.count('"') % 2 == 1:
+                raw = raw[: raw.rfind('"')]
+        # Unescape: if raw contains literal \n, keep; if contains actual newlines, keep
+        # Replace escaped sequences first
+        try:
+            content = raw.replace('\\n', '\n').replace('\\"', '"').replace('\\\\', '\\')
+            # If content still looks JSON-like with unescaped quotes, keep as is
+            return {"tool": "write_file", "input": {"path": path, "content": content}}
+        except Exception:
+            return None
+    except Exception:
+        return None
     return None
 
 
@@ -227,11 +270,25 @@ async def stream_agent_loop(
     for step in range(MAX_STEPS):
         yield {"type": "thinking", "content": f"Planning step {step+1}…"}
         llm_text = await call_llm(messages, model=model)
-        # Check for tool call
         tc = parse_tool_call(llm_text)
+        # Fallback for write_file with unescaped content
+        if tc is None and is_likely_tool_call(llm_text):
+            tc = try_fix_unescaped_write(llm_text)
+            if tc and tc.get("tool") == "write_file":
+                # Validate path
+                if not tc["input"].get("path"):
+                    tc = None
         if tc is None:
-            # No tool — treat as final answer / plan
-            # If empty or LLM error string, try once more
+            if is_likely_tool_call(llm_text):
+                truncated = llm_text.count("{") != llm_text.count("}") or len(llm_text) > 3500
+                if truncated:
+                    msg = "Your tool JSON was truncated (file too large for one turn). Please retry the same file with a smaller chunk (under 80 lines) and ensure valid JSON escaping (\\\" for quotes, \\n for newlines)."
+                else:
+                    msg = "Your tool JSON was malformed (likely unescaped quotes/newlines in content). Please ensure content escapes \" as \\\" and newlines as \\n and output ONLY valid JSON. Example: {\"tool\":\"write_file\",\"input\":{\"path\":\"a.txt\",\"content\":\"hello\\nworld\"}}"
+                yield {"type": "tool_result", "tool": "unknown", "success": False, "output": msg}
+                messages.append({"role": "assistant", "content": llm_text})
+                messages.append({"role": "user", "content": msg})
+                continue
             if not llm_text or llm_text.startswith("LLM error"):
                 yield {"type": "error", "message": llm_text or "Empty LLM response"}
                 break

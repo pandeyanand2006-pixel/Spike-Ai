@@ -2286,6 +2286,84 @@ function renderTree(nodes, container, prefix) {
   addNodes(nodes, container);
 }
 
+// --- Todo system (like the assistant's own todos) ---
+let todoItems = [];
+function initTodo(message) {
+  const lower = (message||"").toLowerCase();
+  let todos = [];
+  if (lower.includes("tshirt") || lower.includes("chax") || lower.includes("t-shirt")) {
+    todos = [
+      {id:1, text:"Setup project structure (package.json, Vite, index.html)", status:"pending"},
+      {id:2, text:"Design CHAX brand & styling", status:"pending"},
+      {id:3, text:"Create homepage with hero & featured products", status:"pending"},
+      {id:4, text:"Build product catalog & customizer", status:"pending"},
+      {id:5, text:"Add cart, checkout & responsive polish", status:"pending"},
+    ];
+  } else if (lower.includes("website") || lower.includes("build")) {
+    todos = [
+      {id:1, text:"Analyze project & create plan", status:"pending"},
+      {id:2, text:"Setup scaffold & dependencies", status:"pending"},
+      {id:3, text:"Implement core pages / features", status:"pending"},
+      {id:4, text:"Add styling & interactivity", status:"pending"},
+      {id:5, text:"Test & validate build", status:"pending"},
+    ];
+  } else {
+    todos = [
+      {id:1, text:"Understand request & inspect project", status:"pending"},
+      {id:2, text:"Implement changes", status:"pending"},
+      {id:3, text:"Validate & report", status:"pending"},
+    ];
+  }
+  todoItems = todos;
+  // Mark first as active
+  if (todoItems[0]) todoItems[0].status = "active";
+  renderTodo();
+  const el = document.getElementById("agent-todo");
+  if (el) el.hidden = false;
+}
+function renderTodo() {
+  const list = document.getElementById("todo-list");
+  const prog = document.getElementById("todo-progress");
+  if (!list) return;
+  list.innerHTML = "";
+  let done = 0;
+  todoItems.forEach((t)=>{
+    const div = document.createElement("div");
+    div.className = "todo-item " + t.status;
+    const icon = t.status==="done" ? "✓" : t.status==="active" ? "●" : "○";
+    div.innerHTML = '<span class="todo-check">'+icon+'</span><span>'+escapeHtml(t.text)+'</span>';
+    list.appendChild(div);
+    if (t.status==="done") done++;
+  });
+  if (prog) prog.textContent = done + "/" + todoItems.length;
+}
+function updateTodoForFile(path) {
+  if (!todoItems.length) return;
+  // Mark active as done, next as active
+  let activeIdx = todoItems.findIndex(t=>t.status==="active");
+  if (activeIdx !== -1) {
+    todoItems[activeIdx].status = "done";
+    let nxt = todoItems.findIndex(t=>t.status==="pending");
+    if (nxt !== -1) todoItems[nxt].status = "active";
+  } else {
+    let nxt = todoItems.findIndex(t=>t.status==="pending");
+    if (nxt !== -1) todoItems[nxt].status = "active";
+  }
+  renderTodo();
+}
+function markTodoActive() {
+  if (!todoItems.length) return;
+  if (!todoItems.some(t=>t.status==="active")) {
+    let nxt = todoItems.findIndex(t=>t.status==="pending");
+    if (nxt !== -1) { todoItems[nxt].status = "active"; renderTodo(); }
+  }
+}
+function completeAllTodos() {
+  todoItems.forEach(t=> t.status="done");
+  renderTodo();
+  setTimeout(()=>{ const el=document.getElementById("agent-todo"); if(el) el.hidden=true; }, 2500);
+}
+
 // Patch sendAgent to include projectId and guard
 const _origSendAgent = sendAgent;
 sendAgent = async function(text) {
@@ -2309,6 +2387,7 @@ sendAgent = async function(text) {
   if (agentStopBtn) agentStopBtn.hidden = false;
   setAgentStatus("working");
   appendAgentBubble("user", escapeHtml(msg));
+  initTodo(msg);
   if (agentInput) { agentInput.value=""; agentAutoResize(); }
   agentController = new AbortController();
   const payload = { message: msg, mode: agentMode, sessionId: agentSessionId || undefined, projectId: selectedProject.id };
@@ -2323,13 +2402,13 @@ sendAgent = async function(text) {
       if(ev.type==="session_started"){ if(ev.sessionId){agentSessionId=ev.sessionId; localStorage.setItem("spike_agent_session",ev.sessionId);} loadAgentSessions(); }
       else if(ev.type==="project_loaded"){ /* could show */ }
       else if(ev.type==="thinking"){ setAgentStatus("thinking"); }
-      else if(ev.type==="tool_start"){ setAgentStatus("working"); const el=appendAgentTool(ev.tool, ev.input, "running"); pendingTools.set(ev.tool+JSON.stringify(ev.input), el); }
+      else if(ev.type==="tool_start"){ setAgentStatus("working"); const el=appendAgentTool(ev.tool, ev.input, "running"); pendingTools.set(ev.tool+JSON.stringify(ev.input), el); markTodoActive(); }
       else if(ev.type==="tool_result"){ const key=ev.tool+JSON.stringify(ev.input||{}); let el=pendingTools.get(key); if(!el){ const tools=agentMessages.querySelectorAll('.agent-tool'); for(let i=tools.length-1;i>=0;i--) if(tools[i].dataset.tool===ev.tool){ el={wrap:tools[i], body:tools[i].querySelector(".agent-tool-body"), badge:tools[i].querySelector(".tool-status")}; break; } } if(el&&el.badge){ el.badge.textContent=ev.success?"✓ done":"✗ failed"; el.badge.className="tool-status "+(ev.success?"ok":"err"); } if(el&&el.body){ el.body.textContent=(ev.output||"").slice(0,6000); el.body.classList.remove("collapsed"); } }
       else if(ev.type==="command_started"){ setAgentStatus("working"); }
       else if(ev.type==="command_result"){ appendAgentTerminal(ev.command||"", ev.output||"", !!ev.success); }
-      else if(ev.type==="file_changed"){ appendAgentFileChange(ev.path); refreshExplorer(); }
+      else if(ev.type==="file_changed"){ appendAgentFileChange(ev.path); updateTodoForFile(ev.path); refreshExplorer(); }
       else if(ev.type==="approval_required"){ appendAgentApproval(ev.tool, ev.input, ev.reason); }
-      else if(ev.type==="completed"){ appendAgentBubble("assistant", renderMarkdown(ev.content||"")); setAgentStatus("completed"); setTimeout(()=>setAgentStatus("ready"),1800); }
+      else if(ev.type==="completed"){ completeAllTodos(); appendAgentBubble("assistant", renderMarkdown(ev.content||"")); setAgentStatus("completed"); setTimeout(()=>setAgentStatus("ready"),1800); }
       else if(ev.type==="error"){ appendAgentBubble("assistant", '<p style="color:#ef4444">⚠️ '+escapeHtml(ev.message||"Agent error")+'</p>'); setAgentStatus("error"); }
       else if(ev.type==="session_ended"){ loadAgentSessions(); }
     } }
