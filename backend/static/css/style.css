@@ -1206,11 +1206,16 @@ html.light .terminal-block { background: #1f2030; }
 .project-search:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(99,102,241,0.12); }
 .project-list { display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow-y: auto; }
 .project-item {
-  display: flex; align-items: center; gap: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 12px; cursor: pointer; background: var(--surface); text-align: left;
+  display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid transparent; border-radius: 12px; cursor: pointer; background: transparent; text-align: left; transition: all 0.12s;
 }
-.project-item:hover { border-color: var(--accent); }
-.project-item.active { border-color: var(--accent); background: rgba(99,102,241,0.08); }
-.project-item-ico { font-size: 22px; }
+.project-item:hover { background: var(--surface-2); }
+.project-item.active { background: rgba(99,102,241,0.10); }
+.project-item-avatar {
+  width: 36px; height: 36px; border-radius: 8px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; font-weight: 800; color: #fff;
+}
+.project-item-check { margin-left: auto; color: var(--accent); font-size: 14px; }
 .project-item-info { flex: 1; min-width: 0; }
 .project-item-name { font-size: 14px; font-weight: 700; }
 .project-item-meta { font-size: 11.5px; color: var(--text-2); }

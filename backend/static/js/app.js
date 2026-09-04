@@ -2169,6 +2169,11 @@ async function loadProjects(search="") {
     projectListEl.innerHTML = '<div style="padding:12px;color:#ef4444;font-size:13px">'+escapeHtml(e.message)+'</div>';
   }
 }
+function projectAvatarColor(name) {
+  const colors = ["#4f46e5","#f59e0b","#06b6d4","#10b981","#ef4444","#8b5cf6","#ec4899","#6366f1","#14b8a6","#f97316"];
+  let h=0; for(let i=0;i<name.length;i++) h=(h*31+name.charCodeAt(i))>>>0;
+  return colors[h % colors.length];
+}
 function renderProjectList(items) {
   if (!projectListEl) return;
   if (!items.length) {
@@ -2179,8 +2184,11 @@ function renderProjectList(items) {
   items.forEach((p) => {
     const el = document.createElement("button");
     el.className = "project-item" + (selectedProject && selectedProject.id===p.id ? " active" : "");
+    const initial = (p.name||"P").trim().charAt(0).toUpperCase();
+    const bg = projectAvatarColor(p.name||"P");
     const time = p.lastOpenedAt ? new Date(p.lastOpenedAt).toLocaleDateString() : "";
-    el.innerHTML = '<span class="project-item-ico">📁</span><span class="project-item-info"><span class="project-item-name">'+escapeHtml(p.name)+'</span><span class="project-item-meta">'+escapeHtml(p.stack||p.template||"")+'</span></span><span class="project-item-time">'+escapeHtml(time)+'</span>';
+    const isActive = selectedProject && selectedProject.id===p.id;
+    el.innerHTML = '<span class="project-item-avatar" style="background:'+bg+'">'+escapeHtml(initial)+'</span><span class="project-item-info"><span class="project-item-name">'+escapeHtml(p.name)+'</span><span class="project-item-meta">'+escapeHtml(p.stack||p.template||"")+'</span></span><span class="project-item-time">'+escapeHtml(time)+'</span>'+(isActive ? '<span class="project-item-check">✓</span>' : '');
     el.addEventListener("click", ()=> selectProject(p));
     projectListEl.appendChild(el);
   });
@@ -2384,6 +2392,37 @@ if (createProjectForm) createProjectForm.addEventListener("submit", async (e)=>{
   } catch(err){ toast(err.message); }
   finally{ if(btn) btn.disabled=false; }
 });
+const importProjectBtn = document.getElementById("import-project-btn");
+const projectZipInput = document.getElementById("project-zip-input");
+if (importProjectBtn && projectZipInput) {
+  importProjectBtn.addEventListener("click", ()=> projectZipInput.click());
+  projectZipInput.addEventListener("change", async ()=>{
+    const file = projectZipInput.files && projectZipInput.files[0];
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith(".zip")) { toast("Select a .zip file"); return; }
+    const name = file.name.replace(/\.zip$/i, "").slice(0,80) || "Imported Project";
+    try {
+      toast("Creating project...");
+      const res = await fetch("/api/projects", { method:"POST", headers: authHeaders(), body: JSON.stringify({ name, description:"Imported from "+file.name, template:"other" }) });
+      if(res.status===401){ toast("Sign in required"); showAuthScreen(true); return; }
+      if(!res.ok){ const err=await res.json().catch(()=>({detail:"Create failed"})); throw new Error(err.detail||"Create failed"); }
+      const p = await res.json();
+      toast("Uploading and extracting...");
+      const fd = new FormData();
+      fd.append("file", file, file.name);
+      const hdr = {};
+      const tok = getToken();
+      if (tok) hdr["Authorization"]="Bearer "+tok;
+      const up = await fetch("/api/projects/"+p.id+"/import", { method:"POST", headers: hdr, body: fd });
+      if(!up.ok){ const err=await up.json().catch(()=>({detail:"Import failed"})); throw new Error(err.detail||"Import failed"); }
+      closeProjectSelector();
+      const fresh = await fetch("/api/projects/"+p.id, { headers: authHeaders() }).then(r=>r.json()).catch(()=>p);
+      await selectProject(fresh);
+      toast("Project imported: "+name);
+    } catch(e){ toast(e.message); }
+    finally{ projectZipInput.value=""; }
+  });
+}
 if (projectBarMain) projectBarMain.addEventListener("click", openProjectSelector);
 if (projectChangeBtn) projectChangeBtn.addEventListener("click", openProjectSelector);
 if (sidebarProjectBtn) sidebarProjectBtn.addEventListener("click", openProjectSelector);

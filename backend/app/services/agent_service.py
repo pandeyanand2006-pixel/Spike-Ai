@@ -133,18 +133,28 @@ async def call_llm(messages: List[Dict[str, str]], model: Optional[str] = None) 
     """Call Groq via the existing AIService (non-streaming) and return content."""
     settings = get_settings()
     mdl = model or settings.model
-    # Use complete with custom system_prompt: we send system as first message via build_history handling.
-    # Simpler: construct history manually and call client directly.
     try:
-        # Use ai_service client directly to allow arbitrary system prompt
         resp = await ai_service.client.chat.completions.create(
             model=mdl,
             messages=messages,
             temperature=0.35,
-            max_tokens=3000,
+            max_tokens=900,
         )
         return (resp.choices[0].message.content or "").strip()
     except Exception as e:
+        # Retry once with lower max_tokens on rate-limit
+        msg = str(e)
+        if "429" in msg or "rate_limit" in msg.lower() or "OTPM" in msg:
+            try:
+                resp = await ai_service.client.chat.completions.create(
+                    model=mdl,
+                    messages=messages[-6:],
+                    temperature=0.35,
+                    max_tokens=600,
+                )
+                return (resp.choices[0].message.content or "").strip()
+            except Exception as e2:
+                return f"LLM error: {e2}"
         return f"LLM error: {e}"
 
 
@@ -197,21 +207,20 @@ async def stream_agent_loop(
         # Also hint the model about workspace root
         if workspace is not None:
             system += f"\nAll file paths are relative to this project's workspace root. Do not use absolute paths.\n"
-    # Seed messages: system + optional history + current task
+    # Seed messages: system + optional history + current task (trimmed for TPM)
     messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
-    # Include prior turn history (trimmed)
     for m in history[-8:]:
         if m.get("role") in ("user", "assistant") and m.get("content"):
-            messages.append({"role": m["role"], "content": m["content"][:3000]})
-    messages.append({"role": "user", "content": user_message})
+            messages.append({"role": m["role"], "content": m["content"][:1200]})
+    messages.append({"role": "user", "content": user_message[:2000]})
 
     # Always start with a quick project inspection to ground the LLM
     yield {"type": "thinking", "content": "Inspecting project…"}
     insp = await execute_tool("inspect_project", {}, mode, workspace=workspace)
     yield {"type": "tool_start", "tool": "inspect_project", "input": {}}
-    yield {"type": "tool_result", "tool": "inspect_project", "success": insp["success"], "output": insp["output"][:6000]}
+    yield {"type": "tool_result", "tool": "inspect_project", "success": insp["success"], "output": insp["output"][:3000]}
     messages.append({"role": "assistant", "content": json.dumps({"tool": "inspect_project", "input": {}})})
-    messages.append({"role": "user", "content": f"Tool inspect_project result:\n{insp['output'][:5000]}"})
+    messages.append({"role": "user", "content": f"Tool inspect_project result:\n{insp['output'][:2500]}"})
 
     # Main loop
     changed_files: List[str] = []
@@ -273,10 +282,9 @@ async def stream_agent_loop(
             # Already emitted command_result; also emit tool_result for uniform handling
             yield {"type": "tool_result", "tool": tool, "success": result.get("success", False), "output": result.get("output", "")[:6000]}
 
-        # Feed result back to LLM
+        # Feed result back to LLM (trimmed)
         messages.append({"role": "assistant", "content": json.dumps(tc)})
-        # Truncate tool output for LLM context
-        out = result.get("output", "")[:4000]
+        out = result.get("output", "")[:2000]
         messages.append({"role": "user", "content": f"Tool {tool} result (success={result.get('success')}):\n{out}"})
 
         # Safety: avoid infinite loops if LLM keeps emitting same tool
