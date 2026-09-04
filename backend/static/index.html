@@ -165,9 +165,9 @@
         </div>
       </div>
 
-      <!-- ============ Agent view ============ -->
+      <!-- ============ Agent view — OpenCode-inspired compact workspace ============ -->
       <div class="view" id="agent-view" hidden>
-        <div class="agent-header">
+        <div class="agent-header agent-header--compact">
           <div class="agent-header-left">
             <span class="agent-header-ico">✦</span>
             <div class="agent-header-text">
@@ -180,10 +180,11 @@
               <button class="agent-mode-btn active" data-mode="build" role="tab" aria-selected="true">Build</button>
               <button class="agent-mode-btn" data-mode="plan" role="tab" aria-selected="false">Plan</button>
             </div>
-            <button class="agent-stop-btn" id="agent-stop" hidden title="Stop agent">Stop</button>
+            <button class="agent-stop-btn" id="agent-stop" hidden title="Stop agent">■ Stop</button>
           </div>
         </div>
-        <div class="project-bar" id="project-bar">
+        <!-- legacy project-bar kept hidden for JS compat; new selector lives in composer -->
+        <div class="project-bar" id="project-bar" hidden>
           <button class="project-bar-main" id="project-bar-main" title="Select project">
             <span class="project-bar-ico">📁</span>
             <span class="project-bar-text">
@@ -196,43 +197,48 @@
             <button class="project-bar-explorer-toggle" id="explorer-toggle" title="Toggle file explorer" hidden>☰ Files</button>
           </div>
         </div>
-        <div class="agent-layout">
-          <div class="agent-main">
-            <div class="agent-todo" id="agent-todo" hidden>
-              <div class="agent-todo-head">Plan <span class="todo-progress" id="todo-progress">0/0</span></div>
-              <div class="todo-list" id="todo-list"></div>
-            </div>
-            <div class="agent-messages" id="agent-messages">
-              <div class="agent-empty" id="agent-empty">
-                <div class="agent-empty-ico">✦</div>
-                <h2>Spike Agent</h2>
-                <p class="agent-empty-sub">Your AI software engineer. Ask me to build, fix, analyze, or refactor.</p>
-                <div class="agent-suggestions">
-                  <button class="agent-sg" data-prompt="Analyze my project and give me a high-level overview.">Analyze my project</button>
-                  <button class="agent-sg" data-prompt="Find all errors in this project and fix them.">Find and fix errors</button>
-                  <button class="agent-sg" data-prompt="Create a new file hello.py that prints 'Hello Spike' and verify it works.">Create hello.py</button>
-                  <button class="agent-sg" data-prompt="Run the tests and fix any failing tests.">Run tests</button>
-                </div>
+        <div class="agent-canvas" id="agent-canvas">
+          <div class="agent-todo" id="agent-todo" hidden>
+            <div class="agent-todo-head">Plan <span class="todo-progress" id="todo-progress">0/0</span></div>
+            <div class="todo-list" id="todo-list"></div>
+          </div>
+          <div class="agent-messages" id="agent-messages">
+            <div class="agent-empty" id="agent-empty">
+              <div class="agent-empty-ico">✦</div>
+              <h2>Spike Agent</h2>
+              <p class="agent-empty-sub">Your AI software engineer. Ask me to build, fix, analyze, or refactor — compact, live, project-aware.</p>
+              <div class="agent-suggestions">
+                <button class="agent-sg" data-prompt="Analyze my project and give me a high-level overview.">Analyze my project</button>
+                <button class="agent-sg" data-prompt="Find all errors in this project and fix them.">Find and fix errors</button>
+                <button class="agent-sg" data-prompt="Create a new file hello.py that prints 'Hello Spike' and verify it works.">Create hello.py</button>
+                <button class="agent-sg" data-prompt="Run the tests and fix any failing tests.">Run tests</button>
               </div>
-            </div>
-            <div class="agent-input-area">
-              <div class="composer-meta" id="composer-meta">
-                <button class="composer-chip" id="composer-add" title="Add">+</button>
-                <span class="composer-chip composer-model" id="composer-model" title="Model">Spike Model</span>
-                <button class="composer-chip composer-project" id="composer-project" title="Select project">📁 Select project ▾</button>
-                <span class="composer-chip composer-git" id="composer-git" title="Git status">No Git</span>
-                <span class="composer-chip composer-bridge" id="composer-bridge" title="Local bridge status">○ Offline</span>
-              </div>
-              <form class="agent-input-form" id="agent-form" autocomplete="off">
-                <textarea id="agent-input" rows="1" placeholder="Ask Spike Agent to build, fix, analyze…"></textarea>
-                <button type="submit" class="agent-send" id="agent-send" title="Send to agent">
-                  <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M3.4 20.4 21.85 12 3.4 3.6 3.39 10l13 2-13 2z"/></svg>
-                </button>
-              </form>
-              <p class="disclaimer">Agent runs tools inside your workspace. Review changes before deploying.</p>
+              <p class="agent-empty-hint">Select a project below, then tell me what to build — files are created live on disk and a dev server URL appears when ready.</p>
             </div>
           </div>
-          <aside class="file-explorer" id="file-explorer" hidden>
+        </div>
+        <div class="agent-composer" id="agent-composer">
+          <div class="agent-context-chips" id="agent-context-chips" hidden></div>
+          <form class="agent-input-form agent-input-form--opencode" id="agent-form" autocomplete="off">
+            <textarea id="agent-input" rows="1" placeholder="Ask Spike Agent to build, fix, analyze… (use @ for files, / for commands)"></textarea>
+            <button type="submit" class="agent-send" id="agent-send" title="Send to agent">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M3.4 20.4 21.85 12 3.4 3.6 3.39 10l13 2-13 2z"/></svg>
+            </button>
+          </form>
+          <div class="composer-toolbar" id="composer-meta">
+            <button class="composer-chip composer-chip--plus" id="composer-add" title="Add context / commands">+</button>
+            <button class="composer-chip" id="composer-model" title="Model">Spike Model ▾</button>
+            <button class="composer-chip composer-chip--project" id="composer-project" title="Select project">📁 Select project ▾</button>
+            <span class="composer-chip composer-chip--muted" id="composer-git" title="Git branch">⎇ No Git</span>
+            <span class="composer-chip composer-chip--muted composer-bridge" id="composer-bridge" title="Local bridge status">○ Offline</span>
+            <button class="composer-chip composer-chip--ghost" id="composer-files" title="Files &amp; changes">☰ Files</button>
+          </div>
+          <p class="disclaimer disclaimer--compact">Project files are edited live on disk. A dev server link appears when the build is ready.</p>
+        </div>
+        <!-- Files / Changes drawer — compact popover, not a large header -->
+        <div class="file-drawer" id="file-explorer" hidden>
+          <div class="file-drawer-backdrop" id="file-drawer-backdrop"></div>
+          <div class="file-drawer-panel">
             <div class="explorer-head">
               <span class="explorer-tabs">
                 <button class="explorer-tab active" id="tab-files" type="button">Files</button>
@@ -241,11 +247,18 @@
               <span class="explorer-head-actions">
                 <button class="explorer-refresh" id="git-refresh" title="Git status">⎇</button>
                 <button class="explorer-refresh" id="explorer-refresh" title="Refresh">↻</button>
+                <button class="explorer-refresh" id="file-drawer-close" title="Close">✕</button>
               </span>
+            </div>
+            <div class="file-drawer-search">
+              <input id="file-drawer-search" type="text" placeholder="Search files… (@ to attach)" autocomplete="off" />
             </div>
             <div class="explorer-tree" id="explorer-tree"></div>
             <div class="changes-panel" id="changes-panel" hidden></div>
-          </aside>
+            <div class="file-drawer-foot">
+              <span class="file-drawer-hint">Click a file to preview · @ to attach as context</span>
+            </div>
+          </div>
         </div>
       </div>
     </section>

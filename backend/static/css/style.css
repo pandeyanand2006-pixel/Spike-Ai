@@ -1347,3 +1347,183 @@ button.composer-chip:hover { border-color: var(--accent); color: var(--text); }
   .composer-meta { padding: 0 4px; }
   .project-menu { position: fixed; left: 16px; right: 16px; min-width: 0; }
 }
+
+/* ============================================================
+   OpenCode-inspired compact redesign — Spike Agent only.
+   Removes large project header, centers conversation,
+   moves project/files into composer toolbar + drawer.
+   ============================================================ */
+
+/* --- hide legacy large bar without breaking JS refs --- */
+.project-bar[hidden] { display: none !important; }
+#agent-view .project-bar { display: none !important; }
+
+/* --- compact agent header (was 14px/34px) --- */
+.agent-header--compact {
+  padding: 8px 14px;
+  min-height: 44px;
+  gap: 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.agent-header--compact .agent-header-ico {
+  width: 26px; height: 26px; border-radius: 7px; font-size: 13px;
+  box-shadow: none;
+}
+.agent-header--compact .agent-header-title { font-size: 13px; font-weight: 700; }
+.agent-header--compact .agent-header-status { font-size: 11px; gap: 5px; }
+.agent-header--compact .agent-dot { width: 7px; height: 7px; }
+.agent-header--compact .agent-mode { border-radius: 8px; }
+.agent-header--compact .agent-mode-btn { padding: 5px 10px; font-size: 11.5px; }
+.agent-header--compact .agent-stop-btn { padding: 5px 10px; font-size: 11.5px; border-radius: 8px; }
+
+/* --- canvas centers conversation, not giant empty workspace --- */
+#agent-view { background: var(--bg); }
+.agent-canvas {
+  flex: 1; min-height: 0; overflow: hidden;
+  display: flex; flex-direction: column;
+  background: var(--bg);
+}
+.agent-canvas .agent-messages {
+  flex: 1; overflow-y: auto;
+  max-width: 760px; width: 100%; margin: 0 auto;
+  padding: 14px 16px 10px;
+  gap: 10px;
+}
+.agent-canvas .agent-empty {
+  padding: 28px 16px; gap: 10px;
+}
+.agent-canvas .agent-empty-ico {
+  width: 44px; height: 44px; font-size: 18px; border-radius: 12px;
+  box-shadow: 0 6px 18px rgba(99,102,241,0.22);
+}
+.agent-canvas .agent-empty h2 { font-size: 17px; }
+.agent-canvas .agent-empty-sub { font-size: 13px; max-width: 520px; line-height: 1.5; }
+.agent-empty-hint { font-size: 11.5px; color: var(--muted); max-width: 520px; line-height: 1.5; margin-top: 4px; }
+.agent-suggestions .agent-sg { padding: 7px 12px; font-size: 12px; border-radius: 999px; }
+
+/* --- compact activity / tool rows --- */
+#agent-view .agent-msg { gap: 8px; }
+#agent-view .agent-bubble { font-size: 13.5px; padding: 11px 14px; border-radius: 12px; }
+#agent-view .agent-tool { border-radius: 8px; }
+#agent-view .agent-tool-head { padding: 7px 10px; font-size: 11.5px; }
+#agent-view .agent-tool-body { font-size: 11.5px; padding: 10px 12px; max-height: 260px; }
+#agent-view .terminal-block { font-size: 11.5px; padding: 10px 12px; border-radius: 8px; }
+#agent-view .agent-file-change { font-size: 11.5px; padding: 6px 10px; border-radius: 8px; }
+#agent-view .agent-todo { margin: 10px 14px 0; border-radius: 10px; }
+#agent-view .agent-todo-head { padding: 8px 12px; font-size: 11px; }
+#agent-view .todo-list { padding: 8px 12px; gap: 5px; }
+#agent-view .todo-item { font-size: 12.5px; }
+
+/* --- composer as primary control area (OpenCode bottom toolbar) --- */
+.agent-composer {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  padding: 10px 14px 8px;
+}
+.agent-context-chips {
+  max-width: 760px; margin: 0 auto 6px;
+  display: flex; gap: 6px; flex-wrap: wrap;
+}
+.agent-context-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11.5px; padding: 4px 8px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--text);
+}
+.agent-context-chip button {
+  border: none; background: none; cursor: pointer; color: var(--muted);
+  font-size: 12px; padding: 0 2px;
+}
+.agent-input-form--opencode {
+  max-width: 760px; margin: 0 auto;
+  border-radius: 12px; padding: 6px 6px 6px 12px;
+  box-shadow: 0 4px 18px rgba(31,32,48,0.08);
+}
+.agent-input-form--opencode:focus-within { box-shadow: 0 0 0 3px rgba(99,102,241,0.12), 0 4px 18px rgba(31,32,48,0.08); }
+#agent-input { font-size: 14px; }
+.composer-toolbar {
+  max-width: 760px; margin: 8px auto 0;
+  display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
+}
+.composer-toolbar .composer-chip {
+  padding: 4px 9px; font-size: 11.5px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--text-2); font-weight: 600; cursor: pointer;
+}
+.composer-toolbar .composer-chip--plus {
+  width: 26px; height: 26px; padding: 0; justify-content: center;
+  border-radius: 50%; font-size: 14px; font-weight: 700;
+}
+.composer-toolbar .composer-chip--project { color: var(--text); }
+.composer-toolbar .composer-chip--muted { color: var(--muted); cursor: default; }
+.composer-toolbar .composer-chip--ghost { color: var(--text-2); }
+.composer-toolbar .composer-chip:hover { border-color: var(--accent); color: var(--text); }
+.disclaimer--compact { font-size: 10.5px; padding: 6px 0 0; color: var(--muted); text-align: center; }
+
+/* --- file drawer (replaces always-visible file-explorer) --- */
+.file-drawer[hidden] { display: none !important; }
+.file-drawer {
+  position: absolute; inset: 0; z-index: 20;
+  display: flex; justify-content: flex-end; align-items: stretch;
+  pointer-events: auto;
+}
+.file-drawer-backdrop {
+  position: absolute; inset: 0;
+  background: rgba(15,14,23,0.22); backdrop-filter: blur(2px);
+}
+.file-drawer-panel {
+  position: relative; width: 340px; max-width: 88vw;
+  background: var(--surface); border-left: 1px solid var(--border);
+  display: flex; flex-direction: column; box-shadow: var(--shadow-lg);
+}
+.file-drawer-search { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.file-drawer-search input {
+  width: 100%; padding: 7px 10px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--bg); color: var(--text);
+  font-size: 12.5px; outline: none;
+}
+.file-drawer-search input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(99,102,241,0.10); }
+.file-drawer .explorer-tree { padding: 8px; font-size: 12.5px; flex: 1; overflow-y: auto; }
+.file-drawer .explorer-item { font-size: 12px; padding: 3px 7px; }
+.file-drawer-foot {
+  padding: 8px 10px; border-top: 1px solid var(--border);
+  font-size: 11px; color: var(--muted); background: var(--surface-2);
+}
+#agent-view .file-explorer[hidden] { display: none !important; }
+
+/* --- sidebar slightly more compact, still Spike branded --- */
+.sidebar { width: 260px; padding: 12px; }
+.sidebar.closed { margin-left: -260px; }
+.sidebar-section-title { padding: 14px 10px 6px; font-size: 10.5px; }
+.chat-item { padding: 8px 10px; font-size: 13px; border-radius: 8px; }
+.agent-btn { padding: 10px 12px; margin: 4px 0 8px; border-radius: 10px; }
+.agent-ico { width: 32px; height: 32px; border-radius: 8px; }
+.agent-title { font-size: 13px; }
+.agent-sub { font-size: 11px; }
+.newchat-row { margin-bottom: 12px; }
+
+/* --- dev server banner --- */
+.dev-server-banner {
+  max-width: 760px; margin: 0 auto; width: 100%;
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; border-radius: 10px;
+  background: rgba(34,197,94,0.10); border: 1px solid rgba(34,197,94,0.22);
+  font-size: 12.5px; font-weight: 600; color: #15803d;
+}
+.dev-server-banner a { color: #15803d; text-decoration: underline; font-weight: 700; }
+.dev-server-banner .dev-dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 0 4px rgba(34,197,94,0.2); }
+
+/* --- responsive: keep composer usable on mobile --- */
+@media (max-width: 860px) {
+  .agent-canvas .agent-messages { padding: 12px 12px 8px; }
+  .agent-composer { padding: 8px 10px 6px; }
+  .composer-toolbar { gap: 5px; }
+  .file-drawer-panel { width: 86vw; }
+}
+@media (max-width: 520px) {
+  .agent-header--compact { padding: 7px 10px; }
+  .agent-header--compact .agent-header-ico { width: 24px; height: 24px; font-size: 12px; }
+  .agent-header--compact .agent-mode-btn { padding: 5px 9px; font-size: 11px; }
+  .composer-toolbar .composer-chip { padding: 3px 8px; font-size: 11px; }
+}

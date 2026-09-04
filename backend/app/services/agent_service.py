@@ -74,6 +74,7 @@ Do NOT attempt write_file, edit_file, delete_file, or run_command. Produce a cle
 
 BUILD_SUFFIX = """
 MODE: BUILD — you may read, search, create, edit, run commands, test, and validate.
+For web projects (calculator, dashboard, etc.): create real files live in the workspace, run npm install if needed, then validate with npm run build or vite build. If the user wants to see it live, run the dev server (npm run dev / vite) and report the localhost URL (e.g., http://localhost:5173) exactly as printed — never invent a URL. Files must actually exist on disk via your tool calls; the dev server runs via run_command in the workspace so the UI can link it.
 """
 
 TOOL_GUIDE = """

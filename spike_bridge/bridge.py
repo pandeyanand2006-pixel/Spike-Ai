@@ -368,7 +368,7 @@ async def execute_local_tool(workspace: Path, tool: str, inp: Dict[str, Any]) ->
             return {"success": True, "output": f"# Workspace: {workspace}\nDetected stack: {', '.join(stacks)}\nTop-level: {top_str}"}
 
         elif tool == "run_command":
-            import subprocess
+            import subprocess, re
             cmd = inp.get("command", "")
             workdir = inp.get("workdir", "") or "."
             timeout = int(inp.get("timeout", 30) or 30)
@@ -377,12 +377,28 @@ async def execute_local_tool(workspace: Path, tool: str, inp: Dict[str, Any]) ->
             wd = _resolve_local(workspace, workdir) if workdir not in (".", "") else workspace
             if not wd.is_dir():
                 return {"success": False, "output": f"workdir not found: {workdir}"}
-            proc = subprocess.run(cmd, shell=True, cwd=str(wd), capture_output=True, text=True, timeout=max(5, min(timeout, 120)))
-            out = (proc.stdout or "") + (proc.stderr or "")
-            out = _mask_secrets(out)
-            if len(out) > 8000:
-                out = out[:4000] + "\n…[truncated]\n" + out[-3500:]
-            return {"success": proc.returncode == 0, "output": f"$ {cmd}\n(exit {proc.returncode})\n" + (out or "(no output)")}
+            is_dev = bool(re.search(r"\b(vite|next\s+dev|npm\s+run\s+dev|yarn\s+dev|pnpm\s+dev)\b", cmd, re.I))
+            eff = max(5, min(timeout, 120))
+            if is_dev:
+                eff = min(eff, 18)
+            try:
+                proc = subprocess.run(cmd, shell=True, cwd=str(wd), capture_output=True, text=True, timeout=eff)
+                out = (proc.stdout or "") + (proc.stderr or "")
+                out = _mask_secrets(out)
+                if len(out) > 8000:
+                    out = out[:4000] + "\n…[truncated]\n" + out[-3500:]
+                m = re.search(r"https?://(?:localhost|127\.0\.0\.1)(?::\d+)?[^\s]*", out)
+                note = f"\n[dev server detected: {m.group(0)}]" if m and is_dev else ""
+                return {"success": proc.returncode == 0, "output": f"$ {cmd}\n(exit {proc.returncode}){note}\n" + (out or "(no output)")}
+            except subprocess.TimeoutExpired as e:
+                out = (e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")) + (e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or ""))
+                out = _mask_secrets(out)
+                if len(out) > 8000:
+                    out = out[:4000] + "\n…[truncated]"
+                m = re.search(r"https?://(?:localhost|127\.0\.0\.1)(?::\d+)?[^\s]*", out)
+                if m:
+                    return {"success": True, "output": f"$ {cmd}\n[running — dev server started]\n[dev server detected: {m.group(0)}]\n" + out}
+                return {"success": False, "output": f"$ {cmd}\n[timeout after {eff}s]\n" + out}
 
         elif tool == "create_directory":
             path = inp.get("path", "")

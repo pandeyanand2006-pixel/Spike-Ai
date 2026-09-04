@@ -428,6 +428,13 @@ def tool_run_command(command: str, workdir: str = "", timeout: int = 30, workspa
         # We normalize by running with cwd=wd, so relative escapes are limited to wd.
         pass
     try:
+        # Dev servers (vite/next) are long-running: run with streaming timeout
+        # so we capture the Local: http://localhost:5173 line quickly and
+        # still return a usable result instead of hanging until full timeout.
+        is_dev = bool(re.search(r"\b(vite|next\s+dev|npm\s+run\s+dev|yarn\s+dev|pnpm\s+dev)\b", command, re.I))
+        eff_timeout = max(5, min(int(timeout or 30), 120))
+        if is_dev:
+            eff_timeout = min(eff_timeout, 18)
         # Use shell=True for convenience (npm, python -m etc). Timeout enforced.
         proc = subprocess.run(
             command,
@@ -435,7 +442,7 @@ def tool_run_command(command: str, workdir: str = "", timeout: int = 30, workspa
             cwd=str(wd),
             capture_output=True,
             text=True,
-            timeout=max(5, min(int(timeout or 30), 120)),
+            timeout=eff_timeout,
         )
         out = (proc.stdout or "") + (proc.stderr or "")
         out = mask_secrets(out)
@@ -449,12 +456,21 @@ def tool_run_command(command: str, workdir: str = "", timeout: int = 30, workspa
             cwd_str = str(wd)
         header = f"$ {command}\n(exit {proc.returncode}, cwd={cwd_str})\n"
         success = proc.returncode == 0
+        # If output contains a localhost URL, surface it clearly for the UI
+        m = re.search(r"https?://(?:localhost|127\.0\.0\.1)(?::\d+)?[^\s]*", out)
+        if m and is_dev:
+            header += f"[dev server detected: {m.group(0)}]\n"
         return {"success": success, "output": header + (out or "(no output)")}
     except subprocess.TimeoutExpired as e:
         out = (e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")) + (e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or ""))
         out = mask_secrets(out)
         if len(out) > MAX_OUTPUT_CHARS:
             out = out[:4000] + "\n…[truncated]"
+        m = re.search(r"https?://(?:localhost|127\.0\.0\.1)(?::\d+)?[^\s]*", out)
+        dev_note = f"\n[dev server detected: {m.group(0)}]" if m else ""
+        # Timeout on dev server is expected (it stays running) — treat as partial success
+        if m:
+            return {"success": True, "output": f"$ {command}\n[running — dev server started]{dev_note}\n" + out}
         return {"success": False, "output": f"$ {command}\n[timeout after {timeout}s]\n" + out}
     except Exception as e:
         return {"success": False, "output": f"Command failed: {e}"}

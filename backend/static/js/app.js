@@ -3154,4 +3154,171 @@ init();
   // Initial
   refreshBridgeStatus();
   setInterval(refreshBridgeStatus, 30000);
+
+  /* ---------- OpenCode compact: files drawer + context chips + @ / + menus ---------- */
+  (function wireCompact() {
+    const drawer = $("file-explorer"); // now the file-drawer
+    const drawerBackdrop = $("file-drawer-backdrop");
+    const drawerClose = $("file-drawer-close");
+    const drawerSearch = $("file-drawer-search");
+    const composerFiles = $("composer-files");
+    const chipsBox = $("agent-context-chips");
+    let contextFiles = []; // {path,name}
+
+    function openDrawer() {
+      if (!drawer) return;
+      drawer.hidden = false;
+      refreshExplorer();
+      if (drawerSearch) setTimeout(() => drawerSearch.focus(), 60);
+    }
+    function closeDrawer() { if (drawer) drawer.hidden = true; }
+    if (composerFiles) composerFiles.addEventListener("click", () => {
+      if (drawer && drawer.hidden) openDrawer();
+      else closeDrawer();
+    });
+    if (drawerBackdrop) drawerBackdrop.addEventListener("click", closeDrawer);
+    if (drawerClose) drawerClose.addEventListener("click", closeDrawer);
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && drawer && !drawer.hidden) closeDrawer(); });
+
+    // Also wire legacy explorerToggle if present to same drawer
+    if (typeof explorerToggle !== "undefined" && explorerToggle) {
+      explorerToggle.addEventListener("click", (e) => { e.preventDefault(); if (drawer.hidden) openDrawer(); else closeDrawer(); });
+    }
+
+    // Filter explorer tree by search input
+    if (drawerSearch && drawerSearch.addEventListener) {
+      drawerSearch.addEventListener("input", () => {
+        const q = drawerSearch.value.trim().toLowerCase();
+        const items = explorerTree ? explorerTree.querySelectorAll(".explorer-item") : [];
+        items.forEach((el) => {
+          const txt = (el.textContent || "").toLowerCase();
+          el.style.display = !q || txt.indexOf(q) !== -1 ? "" : "none";
+        });
+      });
+    }
+
+    // Context chips: shown above composer, compact file chips
+    function renderChips() {
+      if (!chipsBox) return;
+      chipsBox.innerHTML = "";
+      if (!contextFiles.length) { chipsBox.hidden = true; return; }
+      chipsBox.hidden = false;
+      contextFiles.forEach((f) => {
+        const chip = document.createElement("span");
+        chip.className = "agent-context-chip";
+        chip.innerHTML = '📄 ' + escapeHtml(f.name) + ' <button title="Remove">×</button>';
+        chip.querySelector("button").addEventListener("click", () => {
+          contextFiles = contextFiles.filter((x) => x.path !== f.path);
+          renderChips();
+        });
+        chipsBox.appendChild(chip);
+      });
+    }
+    // Expose for file click to add to context
+    window._spikeAddContextFile = function(path, name) {
+      if (contextFiles.some((x) => x.path === path)) return;
+      contextFiles.push({ path, name: name || path.split("/").pop() });
+      renderChips();
+      if (contextFiles.length === 1) toast("Added to context: " + path);
+    };
+    // When explorer renders, clicking a file should add context + preview
+    // Patch renderTree to add @-attach behavior (wrap original)
+    if (typeof renderTree === "function") {
+      const _rt = renderTree;
+      renderTree = function(nodes, container, prefix) {
+        const res = _rt.apply(this, arguments);
+        // add file click enhancement: right-click or click adds chip
+        if (container && container.querySelectorAll) {
+          container.querySelectorAll(".explorer-item.file").forEach((el) => {
+            el.title = (el.title || el.textContent) + " — click to preview, double-click to add to context";
+            el.addEventListener("dblclick", () => {
+              const p = el.title.split(" —")[0].trim();
+              window._spikeAddContextFile(p, p.split("/").pop());
+            });
+          });
+        }
+        return res;
+      };
+    }
+
+    // @ in agent input triggers drawer
+    const inp = $("agent-input");
+    if (inp) {
+      inp.addEventListener("keydown", (e) => {
+        if (e.key === "@" && !e.ctrlKey && !e.metaKey) {
+          // let @ type, then open drawer filtered
+          setTimeout(() => { openDrawer(); if (drawerSearch) { drawerSearch.value = ""; drawerSearch.focus(); } }, 80);
+        }
+      });
+    }
+
+    // + button should show add-popover near composer (reuse existing)
+    // Ensure composer-add opens same popover as sidebar +
+    // (spikeAgentLocal already wires composerAdd to addPopover)
+  })();
+
+  // ----- dev server localhost link rendering helper -----
+  (function wireDevServerBanner() {
+    function extractLocalhost(text) {
+      if (!text) return null;
+      const m = text.match(/https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(?:\/\S*)?/i);
+      return m ? m[0] : null;
+    }
+    // Monkey-patch appendAgentTerminal to also show banner + linkify
+    if (typeof appendAgentTerminal === "function") {
+      const _aat = appendAgentTerminal;
+      appendAgentTerminal = function(cmd, output, success) {
+        const url = extractLocalhost(output) || extractLocalhost(cmd);
+        const res = _aat.apply(this, arguments);
+        // linkify localhost in terminal block
+        try {
+          const blocks = agentMessages ? agentMessages.querySelectorAll(".terminal-block") : [];
+          const last = blocks[blocks.length - 1];
+          if (last && url) {
+            const link = document.createElement("div");
+            link.className = "dev-server-banner";
+            link.style.marginTop = "8px";
+            link.innerHTML = '<span class="dev-dot"></span> <span>Dev server ready → <a href="' + escapeHtml(url) + '" target="_blank" rel="noopener">' + escapeHtml(url) + '</a></span>';
+            last.after(link);
+            // also show toast with link
+            // keep banner visible even after refresh
+            last.innerHTML = last.textContent.replace(/(https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?[^\s]*)/gi, '<a href="$1" target="_blank" style="color:#93c5fd;text-decoration:underline">$1</a>');
+          } else if (last && /vite|next|ready in|Local:/i.test(output)) {
+            // still linkify any URL-looking string
+            const anyUrl = output.match(/https?:\/\/\S+/);
+            if (anyUrl) {
+              last.innerHTML = last.textContent.replace(/(https?:\/\/\S+)/g, '<a href="$1" target="_blank" style="color:#93c5fd;text-decoration:underline">$1</a>');
+            }
+          }
+        } catch (e) {}
+        return res;
+      };
+    }
+    // Also linkify completed message if it contains localhost
+    const _origAppendBubble = typeof appendAgentBubble === "function" ? appendAgentBubble : null;
+    if (_origAppendBubble) {
+      // wrap to linkify localhost URLs in completed markdown
+      const _sendAgent = typeof sendAgent === "function" ? sendAgent : null;
+      // Instead patch the completed handler via observing appends: use MutationObserver
+      if (agentMessages && window.MutationObserver) {
+        const obs = new MutationObserver((muts) => {
+          muts.forEach((m) => {
+            m.addedNodes.forEach((n) => {
+              if (n.nodeType === 1 && n.classList && n.classList.contains("agent-msg")) {
+                const bub = n.querySelector(".agent-bubble");
+                if (bub && /localhost|127\.0\.0\.1/i.test(bub.textContent)) {
+                  bub.innerHTML = bub.innerHTML.replace(/(https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?[^\s<"]*)/gi, '<a href="$1" target="_blank" style="color:var(--accent);text-decoration:underline">$1</a>');
+                }
+              }
+            });
+          });
+        });
+        obs.observe(agentMessages, { childList: true });
+      }
+    }
+  })();
+
+  // Make sure composer-project reflects selected project even when project-bar is hidden
+  // (already wired via _origUpdateProjectUI, just ensure initial sync)
+  try { if (typeof updateProjectUI === "function") updateProjectUI(); } catch (e) {}
 })();
