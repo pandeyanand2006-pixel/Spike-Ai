@@ -140,7 +140,17 @@ def tool_read_file(path: str, offset: int = 1, limit: int = 200, workspace: Path
     return {"success": True, "output": header + body}
 
 
+MAX_TOOL_PARAM_CHARS = 12000
+
 def tool_write_file(path: str, content: str, workspace: Path | None = None) -> Dict[str, Any]:
+    if content and len(content) > MAX_TOOL_PARAM_CHARS:
+        return {
+            "success": False,
+            "output": (
+                f"content too large ({len(content)} chars, max {MAX_TOOL_PARAM_CHARS}). "
+                "Split this into multiple smaller write_file/edit_file calls (under ~150 lines each) targeting small anchor strings."
+            ),
+        }
     try:
         full = _resolve_path(path, workspace)
     except ValueError as e:
@@ -158,6 +168,22 @@ def tool_write_file(path: str, content: str, workspace: Path | None = None) -> D
 
 
 def tool_edit_file(path: str, old_string: str, new_string: str, workspace: Path | None = None) -> Dict[str, Any]:
+    if new_string and len(new_string) > MAX_TOOL_PARAM_CHARS:
+        return {
+            "success": False,
+            "output": (
+                f"new_string too large ({len(new_string)} chars, max {MAX_TOOL_PARAM_CHARS}). "
+                "Split this into multiple smaller edit_file calls (under ~150 lines each) targeting small, unique anchor strings."
+            ),
+        }
+    if old_string and len(old_string) > MAX_TOOL_PARAM_CHARS:
+        return {
+            "success": False,
+            "output": (
+                f"old_string too large ({len(old_string)} chars, max {MAX_TOOL_PARAM_CHARS}). "
+                "Use a smaller, unique anchor string for the replacement."
+            ),
+        }
     try:
         full = _resolve_path(path, workspace)
     except ValueError as e:

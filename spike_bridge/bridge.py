@@ -35,6 +35,8 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 
 IGNORE_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules", "dist", "build", ".next", "coverage"}
 
+MAX_TOOL_PARAM_CHARS = 12000
+
 
 def load_config() -> Dict[str, Any]:
     if CONFIG_FILE.exists():
@@ -217,6 +219,8 @@ async def execute_local_tool(workspace: Path, tool: str, inp: Dict[str, Any]) ->
         elif tool == "write_file":
             path = inp.get("path", "")
             content = inp.get("content", "")
+            if content and len(content) > MAX_TOOL_PARAM_CHARS:
+                return {"success": False, "output": f"content too large ({len(content)} chars, max {MAX_TOOL_PARAM_CHARS}). Split this into multiple smaller write_file/edit_file calls (under ~150 lines each)."}
             full = _resolve_local(workspace, path)
             if full.name == ".env":
                 return {"success": False, "output": "Writing .env is blocked"}
@@ -228,6 +232,10 @@ async def execute_local_tool(workspace: Path, tool: str, inp: Dict[str, Any]) ->
             path = inp.get("path", "")
             old = inp.get("old_string", "")
             new = inp.get("new_string", "")
+            if new and len(new) > MAX_TOOL_PARAM_CHARS:
+                return {"success": False, "output": f"new_string too large ({len(new)} chars, max {MAX_TOOL_PARAM_CHARS}). Split this into multiple smaller edit_file calls (under ~150 lines each)."}
+            if old and len(old) > MAX_TOOL_PARAM_CHARS:
+                return {"success": False, "output": f"old_string too large ({len(old)} chars, max {MAX_TOOL_PARAM_CHARS}). Use a smaller, unique anchor string."}
             full = _resolve_local(workspace, path)
             if not full.exists():
                 return {"success": False, "output": f"File not found: {path}"}

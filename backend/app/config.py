@@ -24,9 +24,10 @@ class Settings:
         self.app_name = "Spike AI"
         self.version = "0.1.0"
 
-        # AI
+        # AI — use a model with first-class tool-use support on Groq
         self.groq_api_key = os.getenv("GROQ_API_KEY", "")
-        self.model = os.getenv("MODEL", "qwen/qwen3.8-27b")
+        # qwen/qwen3.8-27b is not reliably tool-use-tuned; llama-3.3 is well-tested for function calling
+        self.model = os.getenv("MODEL", "llama-3.3-70b-versatile")
 
         # Security
         self.jwt_secret = os.getenv("JWT_SECRET", "change-me-in-production")

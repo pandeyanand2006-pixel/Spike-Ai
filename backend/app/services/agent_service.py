@@ -50,6 +50,12 @@ Rules:
 14. Ask for clarification only when genuinely necessary; otherwise make reasonable assumptions and continue.
 15. Finish the task completely whenever possible.
 
+CRITICAL FILE EDITING RULE — you must follow this or your tool call will fail:
+- When editing or writing a file, if the new content is large, prefer several smaller edit_file calls (each replacing a small, uniquely-matched old_string) over one write_file/edit_file call with a huge new_string.
+- Never pass more than ~150 lines of content in a single tool call's parameter value.
+- If you need to add many new lines (e.g. new HTML sections), insert them incrementally by targeting small anchor points, not by rewriting the whole file at once.
+- Keep each file operation focused and verifiable.
+
 When you have completed the task, respond with a concise summary including:
 ## Completed — what was done
 ### Changes — files created/edited
@@ -79,12 +85,96 @@ def build_system_prompt(mode: str) -> str:
     return base + "\n" + BUILD_SUFFIX
 
 
+def _extract_failed_generation_text(exc: Exception) -> Optional[str]:
+    """Best-effort extract `failed_generation` raw text from Groq tool_use_failed error."""
+    # Groq's error body is often in exc.body or exc.response JSON or str(exc)
+    for attr in ("body", "response", "error"):
+        try:
+            val = getattr(exc, attr, None)
+            if val is not None:
+                if isinstance(val, dict):
+                    # look for failed_generation in dict
+                    if "failed_generation" in val:
+                        return str(val["failed_generation"])
+                    err = val.get("error", {})
+                    if isinstance(err, dict) and "failed_generation" in err:
+                        return str(err["failed_generation"])
+                if hasattr(val, "json"):
+                    try:
+                        j = val.json()
+                        if isinstance(j, dict):
+                            if "failed_generation" in j:
+                                return str(j["failed_generation"])
+                            err = j.get("error", {})
+                            if isinstance(err, dict) and "failed_generation" in err:
+                                return str(err["failed_generation"])
+                    except Exception:
+                        pass
+                s = str(val)
+                if "failed_generation" in s or "<function=" in s:
+                    # try to pull JSON substring
+                    import re as _re
+                    m = _re.search(r'"failed_generation"\s*:\s*"((?:\\.|[^"])*)"', s, _re.S)
+                    if m:
+                        try:
+                            return json.loads('"' + m.group(1) + '"')
+                        except Exception:
+                            return m.group(1)
+                    if "<function=" in s:
+                        return s
+        except Exception:
+            continue
+    s = str(exc)
+    if "failed_generation" in s or "<function=" in s:
+        return s
+    return None
+
+
+def _recover_from_failed_generation(exc: Exception) -> Optional[List[Dict[str, Any]]]:
+    """Parse Hermes-style <function=NAME><parameter=KEY>VALUE</parameter> into tool_calls."""
+    raw = _extract_failed_generation_text(exc)
+    if not raw:
+        return None
+    fn_match = re.search(r"<function=([a-zA-Z_][a-zA-Z0-9_]*)\s*>", raw)
+    if not fn_match:
+        return None
+    tool_name = fn_match.group(1).strip()
+    # Only recover known tools
+    known = {s["function"]["name"] for s in TOOL_SCHEMAS}
+    if tool_name not in known:
+        return None
+    params: Dict[str, Any] = {}
+    for pm in re.finditer(r"<parameter=([a-zA-Z_][a-zA-Z0-9_]*)\s*>\n?(.*?)\n?</parameter>", raw, re.S):
+        key = pm.group(1)
+        val = pm.group(2)
+        # Groq escapes inside; unescape common entities
+        # Keep raw content as-is except strip leading/trailing newline added by regex
+        params[key] = val
+    if not params:
+        return None
+    # Validate required params presence for basic safety
+    # Allow partial but need at least path for file tools
+    if tool_name in ("write_file", "edit_file", "read_file", "delete_file", "create_directory", "get_file_info", "git_diff") and "path" not in params:
+        return None
+    if tool_name == "move_file" and ("src" not in params or "dst" not in params):
+        # bridge uses dst/dest variants
+        if not (("src" in params or "path" in params) and ("dst" in params or "dest" in params or "new_path" in params)):
+            return None
+        if "path" in params and "src" not in params:
+            params["src"] = params.pop("path")
+        if "dest" in params and "dst" not in params:
+            params["dst"] = params.pop("dest")
+    # For edit_file, map content variations
+    return [{"id": "recovered_0", "name": tool_name, "arguments": params}]
+
+
 # ---------- Native tool-calling LLM helper (streaming) ----------
 
 async def call_llm_with_tools(
     messages: List[Dict[str, Any]],
     model: Optional[str] = None,
     stream_callback=None,
+    _retry_for_recovery: bool = True,
 ) -> tuple[str, List[Dict[str, Any]]]:
     """Call Groq with native tools, optionally streaming live deltas.
 
@@ -162,6 +252,26 @@ async def call_llm_with_tools(
             tool_calls.append({"id": entry.get("id") or f"call_{_idx}", "name": name, "arguments": args if isinstance(args, dict) else {}})
         return content_acc.strip(), tool_calls
     except Exception as e:
+        err = str(e)
+        # --- Fix 2: resilient catch + repair for Groq tool_use_failed (400) ---
+        if _retry_for_recovery and ("tool_use_failed" in err or "Failed to call a function" in err):
+            recovered = _recover_from_failed_generation(e)
+            if recovered:
+                return "", recovered
+            # One stricter retry, not infinite
+            try:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Your last tool call failed because the content was too large or "
+                        "malformed. Retry the SAME edit but split it into a smaller "
+                        "edit_file call (under 100 lines) targeting one small, unique "
+                        "anchor string."
+                    ),
+                })
+                return await call_llm_with_tools(messages, model=model, stream_callback=stream_callback, _retry_for_recovery=False)
+            except Exception:
+                pass
         # Fallback to non-streaming if streaming not supported
         msg = str(e)
         if "429" in msg or "rate_limit" in msg.lower() or "OTPM" in msg:
@@ -188,14 +298,14 @@ async def call_llm_with_tools(
                 return text, tcs
             except Exception as e2:
                 return f"LLM error: {e2}", []
-        # Try non-streaming direct
+        # Try non-streaming direct (also guarded for tool_use_failed)
         try:
             resp = await ai_service.client.chat.completions.create(
                 model=mdl,
                 messages=messages,
                 tools=TOOL_SCHEMAS,
                 tool_choice="auto",
-                temperature=0.35,
+                temperature=0.2,
                 max_tokens=max_tokens,
             )
             m = resp.choices[0].message
@@ -210,6 +320,25 @@ async def call_llm_with_tools(
                     tcs.append({"id": tc.id, "name": tc.function.name, "arguments": args if isinstance(args, dict) else {}})
             return text, tcs
         except Exception as e2:
+            err2 = str(e2)
+            if _retry_for_recovery and ("tool_use_failed" in err2 or "Failed to call a function" in err2):
+                recovered2 = _recover_from_failed_generation(e2)
+                if recovered2:
+                    return "", recovered2
+                if _retry_for_recovery:
+                    try:
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "Your last tool call failed because the content was too large or "
+                                "malformed. Retry the SAME edit but split it into a smaller "
+                                "edit_file call (under 100 lines) targeting one small, unique "
+                                "anchor string."
+                            ),
+                        })
+                        return await call_llm_with_tools(messages, model=model, stream_callback=stream_callback, _retry_for_recovery=False)
+                    except Exception:
+                        pass
             return f"LLM error: {e2}", []
 
 
