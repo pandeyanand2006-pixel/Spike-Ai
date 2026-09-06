@@ -125,6 +125,11 @@ def _is_tpd_error(text: str) -> bool:
     return "tokens per day" in low or " tpd" in low
 
 
+def _is_model_error(text: str) -> bool:
+    low = (text or "").lower()
+    return "model_not_found" in low or "decommissioned" in low or "does not exist" in low
+
+
 def build_system_prompt(mode: str) -> str:
     base = AGENT_SYSTEM_PROMPT
     if mode == "plan":
@@ -325,6 +330,8 @@ async def call_llm_with_tools(
                     return await call_llm_with_tools(messages, model=model, stream_callback=stream_callback, _retry_for_recovery=False)
                 except Exception:
                     pass
+            if _is_model_error(err):
+                continue
             # Rate limit handling
             is_rl = "429" in err or "rate_limit" in err.lower() or "rateLimit" in err
             if is_rl:

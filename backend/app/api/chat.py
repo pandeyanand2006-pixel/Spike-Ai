@@ -1,4 +1,5 @@
 """Chat endpoints with streaming, tool routing, and optional persistence."""
+import asyncio
 import json
 from typing import Optional
 
@@ -92,36 +93,73 @@ async def chat_stream(req: ChatRequest, user: Optional[dict] = Depends(optional_
 
     async def event_generator():
         full = []
+        stream_error = None
         try:
             if req.image:
-                # Vision: understand the attached image, then answer.
-                text = await ai_service.vision_complete(
-                    _last_user_text(req) or "Describe this image and help with it.",
-                    req.image,
-                )
-                for chunk in text.split(" "):
-                    tok = (chunk + " ") if chunk else " "
-                    full.append(tok)
-                    yield json.dumps({"token": tok}) + "\n"
+                try:
+                    text = await ai_service.vision_complete(
+                        _last_user_text(req) or "Describe this image and help with it.",
+                        req.image,
+                    )
+                except Exception as e:
+                    # Don't close connection — stream the error as a token so UI can show it
+                    err = getattr(e, "detail", str(e))
+                    yield json.dumps({"token": f"\n\n[Error: {err}]"}) + "\n"
+                    full.append(f"[Error: {err}]")
+                    text = ""
+                if text:
+                    for chunk in text.split(" "):
+                        tok = (chunk + " ") if chunk else " "
+                        full.append(tok)
+                        yield json.dumps({"token": tok}) + "\n"
             else:
-                async for token in ai_service.stream(
-                    _trim_messages(req.messages), model=model, temperature=req.temperature
-                ):
-                    if token:
-                        full.append(token)
-                        yield json.dumps({"token": token}) + "\n"
+                try:
+                    async for token in ai_service.stream(
+                        _trim_messages(req.messages), model=model, temperature=req.temperature
+                    ):
+                        if token:
+                            full.append(token)
+                            yield json.dumps({"token": token}) + "\n"
+                except Exception as e:
+                    # Groq TPD/rate-limit or any stream failure — keep connection open and stream error
+                    msg = getattr(e, "detail", str(e))
+                    if "ALL_MODELS_EXHAUSTED" in msg:
+                        msg = "All models are at today's usage limit — try again later (resets at UTC midnight)."
+                    stream_error = msg
+                    yield json.dumps({"token": f"\n\n[Error: {msg}]"}) + "\n"
+                    full.append(f"[Error: {msg}]")
+        except asyncio.CancelledError:
+            # Client closed connection (e.g., navigated away) — don't treat as server error
+            raise
+        except Exception as e:
+            # Catch-all so connection is never torn down without a final frame
+            msg = getattr(e, "detail", str(e))[:500]
+            yield json.dumps({"error": msg}) + "\n"
+            full.append(f"[Error: {msg}]")
         finally:
-            if user is not None and cid is not None:
-                await conv.add_message(user["id"], cid, "assistant", "".join(full))
-                conv_obj = await conv.get_conversation(user["id"], cid)
-                if conv_obj and conv_obj.get("title") in (None, "New Chat"):
-                    await generate_title(req.messages[0].content, cid, user["id"])
-            yield json.dumps({"conversationId": cid}) + "\n"
+            try:
+                if user is not None and cid is not None:
+                    await conv.add_message(user["id"], cid, "assistant", "".join(full))
+                    conv_obj = await conv.get_conversation(user["id"], cid)
+                    if conv_obj and conv_obj.get("title") in (None, "New Chat"):
+                        await generate_title(req.messages[0].content, cid, user["id"])
+            except Exception:
+                pass
+            # Always send final frame so frontend doesn't see ERR_CONNECTION_CLOSED
+            try:
+                yield json.dumps({"conversationId": cid}) + "\n"
+            except Exception:
+                pass
 
     return StreamingResponse(
         event_generator(),
         media_type="application/x-ndjson",
-        headers={"X-Conversation-Id": cid or ""},
+        headers={
+            "X-Conversation-Id": cid or "",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

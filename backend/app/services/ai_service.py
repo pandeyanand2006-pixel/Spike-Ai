@@ -43,6 +43,10 @@ class AIService:
         elif "tokens per minute" in low or "tpm" in low or "rate_limit" in low or "429" in low:
             self._daily_exhausted[model] = _time.time() + 65
 
+    def _is_model_error(self, err_text: str) -> bool:
+        low = (err_text or "").lower()
+        return "model_not_found" in low or "decommissioned" in low or "does not exist" in low or "model_not_found" in low
+
     def _fallback_chain(self, model: Optional[str]) -> list:
         settings = get_settings()
         chain = list(getattr(settings, "model_fallback_chain", [settings.model]))
@@ -89,6 +93,9 @@ class AIService:
                 return completion.choices[0].message.content or ""
             except Exception as e:
                 last_err = str(e)
+                if self._is_model_error(last_err):
+                    # model doesn't exist for this key — try next in chain immediately
+                    continue
                 is_rl = "429" in last_err or "rate_limit" in last_err.lower()
                 if is_rl:
                     self._mark_exhausted(mdl, last_err)
@@ -105,6 +112,9 @@ class AIService:
         # all exhausted
         if last_err and ("tokens per day" in last_err.lower() or "tpd" in last_err.lower()):
             raise HTTPException(status_code=503, detail="ALL_MODELS_EXHAUSTED: All models are at today's usage limit — try again later")
+        # if last was model_not_found, surface that clearly
+        if last_err and self._is_model_error(last_err):
+            raise HTTPException(status_code=502, detail=f"AI service error: {last_err}")
         raise HTTPException(status_code=502, detail=f"AI service error: {last_err}")
 
     async def stream(
@@ -136,6 +146,8 @@ class AIService:
                 return
             except Exception as e:
                 last_err = str(e)
+                if self._is_model_error(last_err):
+                    continue
                 is_rl = "429" in last_err or "rate_limit" in last_err.lower()
                 if is_rl:
                     self._mark_exhausted(mdl, last_err)
@@ -151,6 +163,8 @@ class AIService:
                 return
         if last_err and ("tokens per day" in last_err.lower() or "tpd" in last_err.lower()):
             yield "\n\n[ALL_MODELS_EXHAUSTED: All models are at today's usage limit — try again later]"
+        elif last_err and self._is_model_error(last_err):
+            yield f"\n\n[Error: {last_err}]"
         elif last_err:
             yield f"\n\n[Error: {last_err}]"
 

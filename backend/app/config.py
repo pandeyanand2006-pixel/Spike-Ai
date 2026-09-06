@@ -26,11 +26,11 @@ class Settings:
 
         # AI — use a model with first-class tool-use support on Groq
         self.groq_api_key = os.getenv("GROQ_API_KEY", "")
-        # qwen/qwen3.8-27b is not reliably tool-use-tuned; llama-3.3 is well-tested for function calling
-        self.model = os.getenv("MODEL", "llama-3.3-70b-versatile")
-        # Fallback chain ordered by daily-quota headroom; checked in Groq console
+        # Verified 2026-09-06: qwen/qwen3.8-27b works but has low TPD (200k); gpt-oss models have higher quota and solid tool-use
+        self.model = os.getenv("MODEL", "openai/gpt-oss-20b")
+        # Fallback chain ordered by daily-quota headroom; checked via Groq console/models API
         _primary = self.model
-        _fallbacks = ["llama-3.1-8b-instant", "qwen/qwen3.8-27b", "llama-3.3-70b-versatile"]
+        _fallbacks = ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"]
         seen = set()
         chain = []
         for m in [_primary] + _fallbacks:

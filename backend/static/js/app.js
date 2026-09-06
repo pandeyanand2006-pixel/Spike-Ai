@@ -731,11 +731,19 @@ function send(textOverride) {
         toast("Please sign in to continue");
         return;
       }
+      // Network / Render cold-start — connection closed before any data
+      const isNetErr = err.message && (err.message.indexOf("Failed to fetch") !== -1 || err.message.indexOf("ERR_CONNECTION") !== -1 || err.message.indexOf("NetworkError") !== -1 || err.message.indexOf("Load failed") !== -1);
+      let displayMsg = err.message || "Request failed";
+      if (isNetErr) {
+        displayMsg = "Connection lost — server may be waking up (Render free tier sleeps after ~15 min idle). Please wait 30s and retry.";
+      } else if (displayMsg.indexOf("ALL_MODELS_EXHAUSTED") !== -1) {
+        displayMsg = "All AI models are at today's usage limit — please try again later (resets at UTC midnight).";
+      }
       const shell = addAssistantShell();
       const contentEl = shell.querySelector(".msg-content");
       contentEl.classList.remove("stream-cursor");
-      contentEl.innerHTML = `<p style="color:#ef4444;font-weight:600">⚠️ ${escapeHtml(err.message)}</p>`;
-      chat.messages.push({ role: "error", content: "Error: " + err.message });
+      contentEl.innerHTML = `<p style="color:#ef4444;font-weight:600">⚠️ ${escapeHtml(displayMsg)}</p>` + (isNetErr ? `<button class="act-btn" onclick="send('${escapeHtml(payload.messages[payload.messages.length-1].content.slice(0,60).replace(/'/g, "\\'"))}')">↻ Retry</button>` : "");
+      chat.messages.push({ role: "error", content: "Error: " + displayMsg });
       save();
     } finally {
       activeController = null;
