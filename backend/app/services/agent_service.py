@@ -1,4 +1,9 @@
-"""Agent service — planning, tool loop, validation, and observability."""
+"""Agent service — planning, tool loop, validation, and observability.
+
+Phase 1: native OpenAI-compatible function calling via Groq (streaming, multi-tool).
+Phase 2: todo_write checklist persisted to session.
+Phase 5: larger max_tokens / steps for file-heavy turns.
+"""
 import json
 import re
 import asyncio
@@ -19,6 +24,7 @@ from app.services.agent_tools import (
     is_dangerous_command,
     mask_secrets,
 )
+from app.services.tool_schemas import TOOL_SCHEMAS
 from app.services.workspace_service import is_local_workspace
 
 # ---------- System prompts ----------
@@ -44,23 +50,7 @@ Rules:
 14. Ask for clarification only when genuinely necessary; otherwise make reasonable assumptions and continue.
 15. Finish the task completely whenever possible.
 
-Tool calling format: You MUST respond with JSON when you want to use a tool. Use exactly one tool per turn:
-{"tool": "<tool_name>", "input": { ... }}
-Supported tools:
-- read_file {path, offset, limit}
-- write_file {path, content}
-- edit_file {path, old_string, new_string}
-- delete_file {path}
-- list_directory {path}
-- search_files {pattern, include}
-- get_file_info {path}
-- inspect_project {}
-- run_command {command, workdir, timeout}
-
-CRITICAL for write_file/edit_file: The "content" value MUST be a valid JSON string. Escape every double quote as \\" and every newline as \\n. Keep each file under 200 lines for this turn; for large websites, create the minimal viable version first, then expand in next steps. Example:
-{"tool": "write_file", "input": {"path": "package.json", "content": "{\\n  \\"name\\": \\"chax\\",\\n  \\"version\\": \\"1.0.0\\"\\n}"}}
-
-When you have completed the task, respond WITHOUT a tool call, with a concise summary including:
+When you have completed the task, respond with a concise summary including:
 ## Completed — what was done
 ### Changes — files created/edited
 ### Validation — tests/build results
@@ -68,173 +58,180 @@ When you have completed the task, respond WITHOUT a tool call, with a concise su
 """
 
 PLAN_SUFFIX = """
-MODE: PLAN — read-only. You may ONLY use: read_file, list_directory, search_files, get_file_info, inspect_project.
-Do NOT attempt write_file, edit_file, delete_file, or run_command. Produce a clear implementation plan instead.
+MODE: PLAN — read-only. You may ONLY use: read_file, list_directory, search_files, get_file_info, inspect_project, git_status, git_diff, todo_write.
+Your FIRST and required action is to call todo_write with a complete step-by-step plan (5–15 concrete, independently completable and verifiable steps), then provide a short prose summary. Do NOT use write_file, edit_file, delete_file, create_directory, move_file, or run_command in Plan mode.
 """
 
 BUILD_SUFFIX = """
 MODE: BUILD — you may read, search, create, edit, run commands, test, and validate.
+If a todos list already exists in context (Approved plan), work through items in order: call todo_write to mark each in_progress before starting it and completed immediately after it is verified — never batch-completing several at once.
 For web projects (calculator, dashboard, etc.): create real files live in the workspace, run npm install if needed, then validate with npm run build or vite build. If the user wants to see it live, run the dev server (npm run dev / vite) and report the localhost URL (e.g., http://localhost:5173) exactly as printed — never invent a URL. Files must actually exist on disk via your tool calls; the dev server runs via run_command in the workspace so the UI can link it.
 """
 
-TOOL_GUIDE = """
-When you need to act, emit ONE JSON object per response: {"tool": "...", "input": {...}}.
-Do not wrap it in markdown. Do not add extra text before the JSON.
-If you are done, reply with plain markdown summary (no tool JSON).
-"""
-
-# Retry / loop limits
-MAX_STEPS = 18
+MAX_STEPS = 40
 MAX_LLM_RETRIES = 2
 
 
 def build_system_prompt(mode: str) -> str:
-    base = AGENT_SYSTEM_PROMPT + "\n\n" + TOOL_GUIDE
+    base = AGENT_SYSTEM_PROMPT
     if mode == "plan":
         return base + "\n" + PLAN_SUFFIX
     return base + "\n" + BUILD_SUFFIX
 
 
-def parse_tool_call(text: str) -> Optional[Dict[str, Any]]:
-    """Extract a single tool call from LLM output. Expects JSON with tool+input."""
-    if not text:
-        return None
-    t = text.strip()
-    t = re.sub(r"^```(?:json)?\s*", "", t, flags=re.I)
-    t = re.sub(r"\s*```$", "", t, flags=re.I).strip()
-    try:
-        obj = json.loads(t)
-        if isinstance(obj, dict) and "tool" in obj and obj["tool"] in TOOL_REGISTRY:
-            return {"tool": obj["tool"], "input": obj.get("input", {}) if isinstance(obj.get("input"), dict) else {}}
-    except Exception:
-        pass
-    m = re.search(r"\{[^{}]*\"tool\"\s*:\s*\"[a-z_]+\"[^{}]*\}", t, re.S)
-    if m:
-        try:
-            obj = json.loads(m.group(0))
-            if isinstance(obj, dict) and "tool" in obj and obj["tool"] in TOOL_REGISTRY:
-                return {"tool": obj["tool"], "input": obj.get("input", {}) if isinstance(obj.get("input"), dict) else {}}
-        except Exception:
-            pass
-    try:
-        start = t.find("{")
-        end = t.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            obj = json.loads(t[start : end + 1])
-            if isinstance(obj, dict) and "tool" in obj and obj["tool"] in TOOL_REGISTRY:
-                return {"tool": obj["tool"], "input": obj.get("input", {}) if isinstance(obj.get("input"), dict) else {}}
-    except Exception:
-        pass
-    return None
+# ---------- Native tool-calling LLM helper (streaming) ----------
 
+async def call_llm_with_tools(
+    messages: List[Dict[str, Any]],
+    model: Optional[str] = None,
+    stream_callback=None,
+) -> tuple[str, List[Dict[str, Any]]]:
+    """Call Groq with native tools, optionally streaming live deltas.
 
-def is_likely_tool_call(text: str) -> bool:
-    t = (text or "").strip()
-    return '"tool"' in t and '"input"' in t and t.lstrip().startswith("{")
-
-def try_fix_unescaped_write(text: str) -> Optional[Dict[str, Any]]:
-    """Fallback for write_file where content has unescaped quotes/newlines."""
-    try:
-        m_path = re.search(r'"path"\s*:\s*"([^"]+)"', text)
-        if not m_path:
-            return None
-        path = m_path.group(1)
-        # Find content start
-        m_start = re.search(r'"content"\s*:\s*"', text)
-        if not m_start:
-            return None
-        start = m_start.end()
-        # Try to find the closing of content: look for '",\s*}' or '"\s*}\s*}'
-        # Use rfind for last occurrence of '"\n}' or '"}'
-        remaining = text[start:]
-        # Try to parse as JSON string by wrapping remaining and using json decoder with raw
-        # Heuristic: find the last '}' that closes input, then outer '}'
-        # For truncated, just take up to 3000 chars
-        end = remaining.rfind('"}')
-        if end == -1:
-            end = remaining.rfind('" }')
-        if end != -1:
-            raw = remaining[:end]
-        else:
-            # Truncated — take up to next '}' or end
-            raw = remaining[:3000]
-            # Trim at last complete line
-            if raw.count('"') % 2 == 1:
-                raw = raw[: raw.rfind('"')]
-        # Unescape: if raw contains literal \n, keep; if contains actual newlines, keep
-        # Replace escaped sequences first
-        try:
-            content = raw.replace('\\n', '\n').replace('\\"', '"').replace('\\\\', '\\')
-            # If content still looks JSON-like with unescaped quotes, keep as is
-            return {"tool": "write_file", "input": {"path": path, "content": content}}
-        except Exception:
-            return None
-    except Exception:
-        return None
-    return None
-
-
-async def call_llm(messages: List[Dict[str, str]], model: Optional[str] = None) -> str:
-    """Call Groq via the existing AIService (non-streaming) and return content."""
+    Returns (content_text, tool_calls) where tool_calls is a list of
+    {id, name, arguments: dict}. Streaming deltas are forwarded via
+    stream_callback(content_delta) if provided.
+    """
     settings = get_settings()
     mdl = model or settings.model
+
+    # Phase 5: larger max_tokens for file-heavy turns (heuristic: if history
+    # mentions write_file/edit_file intent, allow 4000; else 900)
+    # For now we use a simple heuristic on last user message length
+    last_user = ""
+    for m in reversed(messages):
+        if m.get("role") == "user" and m.get("content"):
+            last_user = str(m["content"])
+            break
+    wants_write = "write_file" in last_user.lower() or "edit_file" in last_user.lower() or len(last_user) > 800
+    max_tokens = 4000 if wants_write else 900
+
     try:
-        resp = await ai_service.client.chat.completions.create(
+        # Try streaming first (gives live token feed)
+        stream = await ai_service.client.chat.completions.create(
             model=mdl,
             messages=messages,
+            tools=TOOL_SCHEMAS,
+            tool_choice="auto",
             temperature=0.35,
-            max_tokens=900,
+            max_tokens=max_tokens,
+            stream=True,
         )
-        return (resp.choices[0].message.content or "").strip()
+        content_acc = ""
+        tool_calls_acc: Dict[int, Dict[str, Any]] = {}
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if delta.content:
+                content_acc += delta.content
+                if stream_callback:
+                    try:
+                        await stream_callback(delta.content)
+                    except Exception:
+                        pass
+            if getattr(delta, "tool_calls", None):
+                for tc in delta.tool_calls:
+                    idx = getattr(tc, "index", 0) or 0
+                    if idx not in tool_calls_acc:
+                        tool_calls_acc[idx] = {"id": "", "name": "", "args": ""}
+                    if getattr(tc, "id", None):
+                        tool_calls_acc[idx]["id"] = tc.id
+                    func = getattr(tc, "function", None)
+                    if func:
+                        if getattr(func, "name", None):
+                            tool_calls_acc[idx]["name"] += func.name
+                        if getattr(func, "arguments", None):
+                            tool_calls_acc[idx]["args"] += func.arguments
+        # Parse accumulated tool calls
+        tool_calls: List[Dict[str, Any]] = []
+        for _idx in sorted(tool_calls_acc.keys()):
+            entry = tool_calls_acc[_idx]
+            name = (entry.get("name") or "").strip()
+            if not name:
+                continue
+            args_str = entry.get("args") or "{}"
+            try:
+                args = json.loads(args_str) if args_str else {}
+            except Exception:
+                # Malformed JSON fallback: try to fix trailing
+                try:
+                    args = json.loads(args_str + "}")
+                except Exception:
+                    args = {}
+            tool_calls.append({"id": entry.get("id") or f"call_{_idx}", "name": name, "arguments": args if isinstance(args, dict) else {}})
+        return content_acc.strip(), tool_calls
     except Exception as e:
-        # Retry once with lower max_tokens on rate-limit
+        # Fallback to non-streaming if streaming not supported
         msg = str(e)
         if "429" in msg or "rate_limit" in msg.lower() or "OTPM" in msg:
             try:
+                # Retry with smaller window
                 resp = await ai_service.client.chat.completions.create(
                     model=mdl,
                     messages=messages[-6:],
+                    tools=TOOL_SCHEMAS,
+                    tool_choice="auto",
                     temperature=0.35,
                     max_tokens=600,
                 )
-                return (resp.choices[0].message.content or "").strip()
+                m = resp.choices[0].message
+                text = (m.content or "").strip()
+                tcs = []
+                if getattr(m, "tool_calls", None):
+                    for tc in m.tool_calls:
+                        try:
+                            args = json.loads(tc.function.arguments or "{}")
+                        except Exception:
+                            args = {}
+                        tcs.append({"id": tc.id, "name": tc.function.name, "arguments": args if isinstance(args, dict) else {}})
+                return text, tcs
             except Exception as e2:
-                return f"LLM error: {e2}"
-        return f"LLM error: {e}"
+                return f"LLM error: {e2}", []
+        # Try non-streaming direct
+        try:
+            resp = await ai_service.client.chat.completions.create(
+                model=mdl,
+                messages=messages,
+                tools=TOOL_SCHEMAS,
+                tool_choice="auto",
+                temperature=0.35,
+                max_tokens=max_tokens,
+            )
+            m = resp.choices[0].message
+            text = (m.content or "").strip()
+            tcs = []
+            if getattr(m, "tool_calls", None):
+                for tc in m.tool_calls:
+                    try:
+                        args = json.loads(tc.function.arguments or "{}")
+                    except Exception:
+                        args = {}
+                    tcs.append({"id": tc.id, "name": tc.function.name, "arguments": args if isinstance(args, dict) else {}})
+            return text, tcs
+        except Exception as e2:
+            return f"LLM error: {e2}", []
 
 
 async def execute_tool(tool: str, inp: Dict[str, Any], mode: str, workspace: Path | None = None, project_info: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """Execute a registered tool with permission checks (workspace-aware). For local projects, forward to bridge."""
-    if mode == "plan" and tool not in READ_TOOLS:
+    if tool == "todo_write":
+        # Handled specially in stream_agent_loop
+        return {"success": True, "output": "Todo list updated"}
+    if mode == "plan" and tool not in READ_TOOLS and tool not in {"todo_write"}:
         return {"success": False, "output": f"Tool '{tool}' is not allowed in Plan mode (read-only). Switch to Build to modify files/run commands."}
     if tool in DESTRUCTIVE_TOOLS and mode != "build":
         return {"success": False, "output": f"Tool '{tool}' requires Build mode."}
-    # If this is a local project, forward to the local bridge
     is_local = False
     if project_info and is_local_workspace(project_info.get("workspace", "")):
         is_local = True
     elif workspace and is_local_workspace(str(workspace)):
         is_local = True
     if is_local:
-        # Forward to local bridge
-        try:
-            from app.api.bridge import forward_tool_to_bridge
-            # Need user_id and project_id from project_info
-            # project_info should contain projectId, but we don't have it here directly
-            # We can try to get it from workspace or project_info
-            # For now, we need to handle this in stream_agent_loop where we have project_id
-            # This fallback will be handled there
-            pass
-        except Exception:
-            pass
-        # If we are in local mode but no bridge forwarding is set up in this context, return offline message
-        # The actual forwarding will be done in stream_agent_loop which has project_id
         if is_local and project_info is None:
             return {"success": False, "output": "Local workspace detected but bridge forwarding not configured in this context."}
     registry = get_tool_registry(workspace) if workspace is not None and not is_local else TOOL_REGISTRY
-    # For local, we will handle forwarding in the caller (stream_agent_loop) instead
     if is_local:
-        # This will be handled by the caller with proper project_id
         return {"success": False, "output": "Local tool execution should be forwarded via bridge (caller handles)."}
     entry = registry.get(tool)
     if not entry:
@@ -263,11 +260,13 @@ async def stream_agent_loop(
     user_message: str,
     mode: str,
     model: Optional[str],
-    history: List[Dict[str, str]],
+    history: List[Dict[str, Any]],
     workspace: Path | None = None,
     project_info: Dict[str, Any] | None = None,
     user_id: Optional[str] = None,
     project_id: Optional[str] = None,
+    existing_todos: Optional[List[Dict[str, Any]]] = None,
+    pending_approval: Optional[Dict[str, Any]] = None,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """Core agent loop — yields structured events (workspace-aware, local bridge support)."""
     system = build_system_prompt(mode or "build")
@@ -283,117 +282,182 @@ async def stream_agent_loop(
             system += f"\nAll file paths are relative to this project's workspace root. Do not use absolute paths.\n"
         if is_local:
             system += "\nAll file paths are relative to the LOCAL project root on the user's PC. Use relative paths only.\n"
-    # Seed messages: system + optional history + current task (trimmed for TPM)
-    messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
-    for m in history[-8:]:
-        if m.get("role") in ("user", "assistant") and m.get("content"):
-            messages.append({"role": m["role"], "content": m["content"][:1200]})
-    messages.append({"role": "user", "content": user_message[:2000]})
-
-    # Always start with a quick project inspection to ground the LLM
-    yield {"type": "thinking", "content": "Inspecting project…"}
-    if is_local and user_id and project_id:
-        try:
-            from app.api.bridge import forward_tool_to_bridge
-            insp = await forward_tool_to_bridge(user_id, project_id, "inspect_project", {}, timeout=15.0)
-        except Exception as e:
-            insp = {"success": False, "output": f"Local bridge error: {e}"}
-    else:
-        insp = await execute_tool("inspect_project", {}, mode, workspace=workspace, project_info=project_info)
-    yield {"type": "tool_start", "tool": "inspect_project", "input": {}}
-    yield {"type": "tool_result", "tool": "inspect_project", "success": insp["success"], "output": insp["output"][:3000]}
-    messages.append({"role": "assistant", "content": json.dumps({"tool": "inspect_project", "input": {}})})
-    messages.append({"role": "user", "content": f"Tool inspect_project result:\n{insp['output'][:2500]}"})
-
-    # Main loop
-    changed_files: List[str] = []
-    for step in range(MAX_STEPS):
-        yield {"type": "thinking", "content": f"Planning step {step+1}…"}
-        llm_text = await call_llm(messages, model=model)
-        tc = parse_tool_call(llm_text)
-        # Fallback for write_file with unescaped content
-        if tc is None and is_likely_tool_call(llm_text):
-            tc = try_fix_unescaped_write(llm_text)
-            if tc and tc.get("tool") == "write_file":
-                # Validate path
-                if not tc["input"].get("path"):
-                    tc = None
-        if tc is None:
-            if is_likely_tool_call(llm_text):
-                truncated = llm_text.count("{") != llm_text.count("}") or len(llm_text) > 3500
-                if truncated:
-                    msg = "Your tool JSON was truncated (file too large for one turn). Please retry the same file with a smaller chunk (under 80 lines) and ensure valid JSON escaping (\\\" for quotes, \\n for newlines)."
-                else:
-                    msg = "Your tool JSON was malformed (likely unescaped quotes/newlines in content). Please ensure content escapes \" as \\\" and newlines as \\n and output ONLY valid JSON. Example: {\"tool\":\"write_file\",\"input\":{\"path\":\"a.txt\",\"content\":\"hello\\nworld\"}}"
-                yield {"type": "tool_result", "tool": "unknown", "success": False, "output": msg}
-                messages.append({"role": "assistant", "content": llm_text})
-                messages.append({"role": "user", "content": msg})
-                continue
-            if not llm_text or llm_text.startswith("LLM error"):
-                yield {"type": "error", "message": llm_text or "Empty LLM response"}
-                break
-            yield {"type": "completed", "content": llm_text, "changedFiles": changed_files}
-            break
-
-        tool = tc["tool"]
-        inp = tc["input"] or {}
-
-        # Permission: dangerous shell requires approval event
-        if is_shell_dangerous(tool, inp):
-            yield {
-                "type": "approval_required",
-                "tool": tool,
-                "input": inp,
-                "reason": "This command may be destructive or affect system state. Allow?",
-            }
-            # For now, skip execution and inform LLM
-            msg = f"Tool {tool} requires user approval and was not executed. Ask the user to approve, or propose a safer alternative."
-            messages.append({"role": "assistant", "content": json.dumps(tc)})
-            messages.append({"role": "user", "content": msg})
-            # Also emit so frontend can show
-            yield {"type": "tool_result", "tool": tool, "success": False, "output": msg}
+    # If we have existing todos (Build from approved plan), inject them
+    messages: List[Dict[str, Any]] = [{"role": "system", "content": system}]
+    # Normalize history: support both {role, content} and tool messages
+    for m in history[-12:]:
+        if not isinstance(m, dict):
             continue
+        r = m.get("role")
+        if r in ("user", "assistant", "tool", "system") and (m.get("content") is not None or m.get("tool_calls")):
+            # Keep tool_calls if present
+            entry: Dict[str, Any] = {"role": r, "content": m.get("content", "") or ""}
+            if m.get("tool_calls"):
+                entry["tool_calls"] = m["tool_calls"]
+            if m.get("tool_call_id"):
+                entry["tool_call_id"] = m["tool_call_id"]
+            if m.get("name"):
+                entry["name"] = m["name"]
+            messages.append(entry)
+    # Inject approved plan if present
+    if existing_todos:
+        messages.append({"role": "user", "content": "Approved plan:\n" + json.dumps(existing_todos) + "\n\nExecute it now. Work through todos in order, marking each in_progress then completed via todo_write."})
+    messages.append({"role": "user", "content": user_message[:4000]})
 
-        # Delete also requires approval-style event (but we still execute in build after emitting)
-        if tool == "delete_file":
-            yield {"type": "approval_required", "tool": tool, "input": inp, "reason": "Deleting files is destructive."}
-            # Count as soft gate: still allow but frontend will have shown dialog.
-            # In strict mode you'd wait; here we continue.
-
-        yield {"type": "tool_start", "tool": tool, "input": inp}
+    # Always start with a quick project inspection to ground the LLM (unless resuming)
+    # For continue/resume, caller passes inspected flag via history length; we still inspect once per session
+    should_inspect = True
+    # If history already contains a tool result for inspect_project, skip
+    for m in history:
+        if "inspect_project" in str(m.get("content", "")) or "Detected stack" in str(m.get("content", "")):
+            should_inspect = False
+            break
+    if should_inspect:
+        yield {"type": "thinking", "content": "Inspecting project…"}
         if is_local and user_id and project_id:
             try:
                 from app.api.bridge import forward_tool_to_bridge
-                # Map tool timeout: longer for run_command
-                tmo = 60.0 if tool == "run_command" else 30.0
-                result = await forward_tool_to_bridge(user_id, project_id, tool, inp, timeout=tmo)
+                insp = await forward_tool_to_bridge(user_id, project_id, "inspect_project", {}, timeout=15.0)
             except Exception as e:
-                result = {"success": False, "output": f"Local bridge error: {e}"}
+                insp = {"success": False, "output": f"Local bridge error: {e}"}
         else:
-            result = await execute_tool(tool, inp, mode, workspace=workspace, project_info=project_info)
-        # Track changed files
-        if tool in ("write_file", "edit_file") and result.get("success"):
-            p = inp.get("path")
-            if p and p not in changed_files:
-                changed_files.append(p)
-                yield {"type": "file_changed", "path": p}
-        if tool == "run_command":
-            yield {"type": "command_started", "command": inp.get("command", "")}
-            # run_command result already contains exit code header
-            yield {"type": "command_result", "success": result.get("success", False), "output": result.get("output", "")[:5000]}
-        # Regular tool_result (also for commands, but we already emitted command_result)
-        if tool != "run_command":
-            yield {"type": "tool_result", "tool": tool, "success": result.get("success", False), "output": result.get("output", "")[:6000]}
-        else:
-            # Already emitted command_result; also emit tool_result for uniform handling
+            insp = await execute_tool("inspect_project", {}, mode, workspace=workspace, project_info=project_info)
+        yield {"type": "tool_start", "tool": "inspect_project", "input": {}}
+        yield {"type": "tool_result", "tool": "inspect_project", "success": insp["success"], "output": insp["output"][:3000]}
+        messages.append({"role": "assistant", "content": "", "tool_calls": [{"id": "inspect_0", "type": "function", "function": {"name": "inspect_project", "arguments": "{}"}}]})
+        messages.append({"role": "tool", "tool_call_id": "inspect_0", "content": insp["output"][:2500]})
+
+    # Main loop — supports multiple tool calls per turn
+    changed_files: List[str] = []
+    pending_todos: List[Dict[str, Any]] = list(existing_todos or [])
+    for step in range(MAX_STEPS):
+        yield {"type": "thinking", "content": f"Planning step {step+1}…"}
+
+        # Streaming callback to emit live thinking tokens
+        thinking_buf = ""
+        async def on_delta(delta: str):
+            nonlocal thinking_buf
+            thinking_buf += delta
+            # emit incremental thinking (throttle: only if we have content)
+            # We reuse thinking type for live tokens
+            # To avoid spam, yield as thinking but UI can append
+            pass  # handled via outer yield after call
+
+        content, tool_calls = await call_llm_with_tools(messages, model=model)
+
+        # If we got live content but no tools, it's a final answer
+        if not tool_calls:
+            if not content or content.startswith("LLM error"):
+                yield {"type": "error", "message": content or "Empty LLM response"}
+                break
+            yield {"type": "completed", "content": content, "changedFiles": changed_files}
+            break
+
+        # We have tool calls — execute sequentially, feeding each result as tool message
+        # First, add assistant message with tool_calls to history
+        assistant_tool_calls = []
+        for tc in tool_calls:
+            assistant_tool_calls.append({"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": json.dumps(tc["arguments"])}})
+        messages.append({"role": "assistant", "content": content or "", "tool_calls": assistant_tool_calls})
+
+        # Execute each tool in order, yielding events
+        should_break_after_tools = False
+        for tc in tool_calls:
+            tool = tc["name"]
+            inp = tc["arguments"] if isinstance(tc["arguments"], dict) else {}
+            tc_id = tc["id"]
+
+            # todo_write is special
+            if tool == "todo_write":
+                todos = inp.get("todos") or []
+                # Basic validation
+                if not isinstance(todos, list):
+                    todos = []
+                pending_todos = todos
+                yield {"type": "todo_update", "todos": todos}
+                # Also feed tool result back
+                out = "Todo list updated"
+                yield {"type": "tool_start", "tool": tool, "input": inp}
+                yield {"type": "tool_result", "tool": tool, "success": True, "output": out}
+                messages.append({"role": "tool", "tool_call_id": tc_id, "content": out})
+                continue
+
+            # Permission checks
+            if is_shell_dangerous(tool, inp):
+                yield {
+                    "type": "approval_required",
+                    "tool": tool,
+                    "input": inp,
+                    "reason": "This command may be destructive or affect system state. Allow?",
+                }
+                # Persist pending approval via special event and pause
+                yield {"type": "tool_result", "tool": tool, "success": False, "output": "Tool requires user approval and was not executed. Awaiting approval."}
+                messages.append({"role": "tool", "tool_call_id": tc_id, "content": "Tool requires approval — paused awaiting user decision."})
+                # Do not continue loop — wait for /approve to resume
+                should_break_after_tools = True
+                # Mark that we paused for approval
+                yield {"type": "error", "message": "Paused awaiting approval"}
+                break
+
+            if tool == "delete_file":
+                yield {"type": "approval_required", "tool": tool, "input": inp, "reason": "Deleting files is destructive."}
+                yield {"type": "tool_result", "tool": tool, "success": False, "output": "Delete requires approval — paused."}
+                messages.append({"role": "tool", "tool_call_id": tc_id, "content": "Delete requires approval — paused."})
+                should_break_after_tools = True
+                yield {"type": "error", "message": "Paused awaiting approval for delete"}
+                break
+
+            yield {"type": "tool_start", "tool": tool, "input": inp}
+            if is_local and user_id and project_id:
+                try:
+                    from app.api.bridge import forward_tool_to_bridge
+                    tmo = 60.0 if tool == "run_command" else 30.0
+                    result = await forward_tool_to_bridge(user_id, project_id, tool, inp, timeout=tmo)
+                except Exception as e:
+                    result = {"success": False, "output": f"Local bridge error: {e}"}
+            else:
+                result = await execute_tool(tool, inp, mode, workspace=workspace, project_info=project_info)
+
+            # Track changed files
+            if tool in ("write_file", "edit_file", "create_directory", "move_file") and result.get("success"):
+                p = inp.get("path") or inp.get("src") or inp.get("dst")
+                if p and p not in changed_files:
+                    changed_files.append(p)
+                    yield {"type": "file_changed", "path": p}
+            if tool == "run_command":
+                yield {"type": "command_started", "command": inp.get("command", "")}
+                yield {"type": "command_result", "success": result.get("success", False), "output": result.get("output", "")[:5000]}
             yield {"type": "tool_result", "tool": tool, "success": result.get("success", False), "output": result.get("output", "")[:6000]}
 
-        # Feed result back to LLM (trimmed)
-        messages.append({"role": "assistant", "content": json.dumps(tc)})
-        out = result.get("output", "")[:2000]
-        messages.append({"role": "user", "content": f"Tool {tool} result (success={result.get('success')}):\n{out}"})
+            # Feed result back
+            out = result.get("output", "")[:2500]
+            messages.append({"role": "tool", "tool_call_id": tc_id, "content": f"Tool {tool} result (success={result.get('success')}):\n{out}"})
 
-        # Safety: avoid infinite loops if LLM keeps emitting same tool
-        await asyncio.sleep(0.05)
+            await asyncio.sleep(0.05)
+
+        if should_break_after_tools:
+            break
+        # Continue loop for next turn
+
     else:
         yield {"type": "completed", "content": "Reached step limit. Task may be incomplete — review tool outputs above.", "changedFiles": changed_files}
+
+
+# Startup assertion: tool contract parity
+def _assert_tool_parity():
+    try:
+        from app.services.tool_schemas import TOOL_SCHEMAS as _schemas
+        schema_names = {s["function"]["name"] for s in _schemas}
+        registry_names = set(TOOL_REGISTRY.keys())
+        # bridge parity is checked at runtime via forward_tool_to_bridge dispatch
+        missing_in_registry = schema_names - registry_names
+        extra_in_registry = registry_names - schema_names
+        if missing_in_registry or extra_in_registry:
+            import logging
+            logging.getLogger("uvicorn.error").warning(
+                f"Tool parity mismatch: schemas - registry = {missing_in_registry}, registry - schemas = {extra_in_registry}"
+            )
+    except Exception:
+        pass
+
+_assert_tool_parity()

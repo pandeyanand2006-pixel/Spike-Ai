@@ -44,6 +44,9 @@ async def create_agent_session(user_id: str, title: str, mode: str, project_id: 
         "messages": [],
         "toolEvents": [],
         "changedFiles": [],
+        "todos": [],
+        "pendingApproval": None,
+        "inspected": False,
     }
     pid = _oid_or_original(project_id)
     if pid is not None:
@@ -111,15 +114,21 @@ async def delete_agent_session(user_id: str, session_id: str) -> bool:
         return False
 
 
-async def append_agent_message(user_id: str, session_id: str, role: str, content: str):
+async def append_agent_message(user_id: str, session_id: str, role: str, content: str, extra: Optional[dict] = None):
     uid = _safe_oid(user_id)
     sid = _safe_oid(session_id)
     if uid is None or sid is None:
         return
     try:
+        msg: dict = {"role": role, "content": content, "at": _now()}
+        if extra:
+            # allow tool_calls, tool_call_id, name
+            for k in ("tool_calls", "tool_call_id", "name"):
+                if k in extra and extra[k] is not None:
+                    msg[k] = extra[k]
         await get_db().agent_sessions.update_one(
             {"_id": sid, "userId": uid},
-            {"$push": {"messages": {"role": role, "content": content, "at": _now()}}, "$set": {"updatedAt": _now()}},
+            {"$push": {"messages": msg}, "$set": {"updatedAt": _now()}},
         )
     except Exception:
         pass
@@ -176,6 +185,48 @@ async def update_agent_title(user_id: str, session_id: str, title: str):
         await get_db().agent_sessions.update_one(
             {"_id": sid, "userId": uid},
             {"$set": {"title": title[:60], "updatedAt": _now()}},
+        )
+    except Exception:
+        pass
+
+
+async def update_agent_todos(user_id: str, session_id: str, todos: List[dict]):
+    uid = _safe_oid(user_id)
+    sid = _safe_oid(session_id)
+    if uid is None or sid is None:
+        return
+    try:
+        await get_db().agent_sessions.update_one(
+            {"_id": sid, "userId": uid},
+            {"$set": {"todos": todos, "updatedAt": _now()}},
+        )
+    except Exception:
+        pass
+
+
+async def update_pending_approval(user_id: str, session_id: str, approval: Optional[dict]):
+    uid = _safe_oid(user_id)
+    sid = _safe_oid(session_id)
+    if uid is None or sid is None:
+        return
+    try:
+        await get_db().agent_sessions.update_one(
+            {"_id": sid, "userId": uid},
+            {"$set": {"pendingApproval": approval, "updatedAt": _now()}},
+        )
+    except Exception:
+        pass
+
+
+async def set_inspected(user_id: str, session_id: str, inspected: bool = True):
+    uid = _safe_oid(user_id)
+    sid = _safe_oid(session_id)
+    if uid is None or sid is None:
+        return
+    try:
+        await get_db().agent_sessions.update_one(
+            {"_id": sid, "userId": uid},
+            {"$set": {"inspected": inspected, "updatedAt": _now()}},
         )
     except Exception:
         pass

@@ -15,9 +15,13 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from app.config import PROJECT_DIR as _PROJECT_DIR, get_settings
+from app.services.tool_schemas import TOOL_SCHEMAS as _SHARED_TOOL_SCHEMAS
 
 # Workspace root — the repo (ai-chatbot). Resolved once.
 WORKSPACE: Path = Path(_PROJECT_DIR).resolve()
+
+# Re-export shared schemas as the authoritative tool contract
+TOOL_SCHEMAS = _SHARED_TOOL_SCHEMAS
 
 IGNORE_DIRS = {".git", "__pycache__", ".venv", "venv", "env", ".mypy_cache", ".pytest_cache", "node_modules", "dist", "build", ".next", "coverage", ".turbo", ".parcel-cache"}
 IGNORE_FILES = {".env"}
@@ -408,6 +412,75 @@ def tool_inspect_project(workspace: Path | None = None) -> Dict[str, Any]:
     return {"success": True, "output": "\n".join(lines)}
 
 
+def tool_create_directory(path: str, workspace: Path | None = None) -> Dict[str, Any]:
+    try:
+        full = _resolve_path(path, workspace)
+    except ValueError as e:
+        return {"success": False, "output": str(e)}
+    try:
+        full.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        return {"success": False, "output": f"mkdir failed: {e}"}
+    return {"success": True, "output": f"Created directory {path}"}
+
+
+def tool_move_file(src: str, dst: str, workspace: Path | None = None) -> Dict[str, Any]:
+    # Support old bridge param names dst/dest
+    if not src or not dst:
+        return {"success": False, "output": "move_file needs src and dst"}
+    try:
+        full_src = _resolve_path(src, workspace)
+        full_dst = _resolve_path(dst, workspace)
+    except ValueError as e:
+        return {"success": False, "output": str(e)}
+    if not full_src.exists():
+        return {"success": False, "output": f"Not found: {src}"}
+    if full_dst.exists():
+        return {"success": False, "output": f"Destination exists: {dst}"}
+    try:
+        full_dst.parent.mkdir(parents=True, exist_ok=True)
+        full_src.rename(full_dst)
+    except Exception as e:
+        return {"success": False, "output": f"Move failed: {e}"}
+    return {"success": True, "output": f"Moved {src} -> {dst}"}
+
+
+def tool_git_status(workspace: Path | None = None) -> Dict[str, Any]:
+    ws = (workspace or WORKSPACE).resolve()
+    try:
+        branch = subprocess.run(["git", "branch", "--show-current"], cwd=str(ws), capture_output=True, text=True, timeout=10)
+        st = subprocess.run(["git", "status", "--short", "--branch"], cwd=str(ws), capture_output=True, text=True, timeout=10)
+        if st.returncode != 0 and "not a git repository" in (st.stderr or "").lower():
+            return {"success": False, "output": "Not a git repository."}
+        out = (st.stdout or st.stderr or "").strip() or "(clean)"
+        br = (branch.stdout or "").strip() or "detached"
+        return {"success": st.returncode == 0, "output": f"branch: {br}\n{out[:6000]}"}
+    except Exception as e:
+        return {"success": False, "output": f"git_status failed: {e}"}
+
+
+def tool_git_diff(path: str = "", workspace: Path | None = None) -> Dict[str, Any]:
+    ws = (workspace or WORKSPACE).resolve()
+    rel = (path or "").strip().replace("\\", "/").lstrip("/")
+    if ".." in rel.split("/"):
+        return {"success": False, "output": "Invalid path."}
+    try:
+        args = ["git", "diff", "--", rel] if rel else ["git", "diff", "--stat"]
+        proc = subprocess.run(args, cwd=str(ws), capture_output=True, text=True, timeout=10)
+        out = (proc.stdout or "").strip() or "(no changes)"
+        if not rel:
+            # also show full diff head for stat case if small
+            if proc.returncode == 0 and out != "(no changes)":
+                # append limited unified diff
+                proc2 = subprocess.run(["git", "diff"], cwd=str(ws), capture_output=True, text=True, timeout=10)
+                extra = (proc2.stdout or "")[:8000]
+                if extra:
+                    out = out + "\n---\n" + extra
+        return {"success": proc.returncode == 0, "output": out[:12000]}
+    except Exception as e:
+        return {"success": False, "output": f"git_diff failed: {e}"}
+
+
 def tool_run_command(command: str, workdir: str = "", timeout: int = 30, workspace: Path | None = None) -> Dict[str, Any]:
     ws = (workspace or WORKSPACE).resolve()
     if not command or not command.strip():
@@ -523,11 +596,36 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "params": ["command", "workdir", "timeout"],
         "fn": lambda **kw: tool_run_command(kw.get("command", ""), kw.get("workdir", ""), int(kw.get("timeout", 30) or 30)),
     },
+    "create_directory": {
+        "description": "Create a directory (including parents).",
+        "params": ["path"],
+        "fn": lambda **kw: tool_create_directory(kw.get("path", "")),
+    },
+    "move_file": {
+        "description": "Move or rename a file.",
+        "params": ["src", "dst"],
+        "fn": lambda **kw: tool_move_file(kw.get("src", "") or kw.get("path", ""), kw.get("dst", "") or kw.get("dest", "") or kw.get("new_path", "")),
+    },
+    "git_status": {
+        "description": "Show git status --short --branch and current branch.",
+        "params": [],
+        "fn": lambda **kw: tool_git_status(),
+    },
+    "git_diff": {
+        "description": "Show git diff (or diff for a single file).",
+        "params": ["path"],
+        "fn": lambda **kw: tool_git_diff(kw.get("path", "")),
+    },
+    "todo_write": {
+        "description": "Create or update the task checklist for this session. Always pass FULL current list.",
+        "params": ["todos"],
+        "fn": lambda **kw: {"success": True, "output": "Todo list updated (handled by loop)"},
+    },
 }
 
 # Permission sets
-READ_TOOLS = {"read_file", "list_directory", "search_files", "get_file_info", "inspect_project"}
-WRITE_TOOLS = {"write_file", "edit_file"}
+READ_TOOLS = {"read_file", "list_directory", "search_files", "get_file_info", "inspect_project", "git_status", "git_diff"}
+WRITE_TOOLS = {"write_file", "edit_file", "create_directory", "move_file"}
 DESTRUCTIVE_TOOLS = {"delete_file"}
 SHELL_TOOLS = {"run_command"}
 
@@ -581,4 +679,29 @@ def get_tool_registry(workspace: Path | None = None) -> Dict[str, Dict[str, Any]
             "params": ["command", "workdir", "timeout"],
             "fn": lambda **kw: tool_run_command(kw.get("command", ""), kw.get("workdir", ""), int(kw.get("timeout", 30) or 30), workspace=ws),
         },
-    }
+        "create_directory": {
+            "description": "Create a directory (including parents).",
+            "params": ["path"],
+            "fn": lambda **kw: tool_create_directory(kw.get("path", ""), workspace=ws),
+        },
+        "move_file": {
+            "description": "Move or rename a file.",
+            "params": ["src", "dst"],
+            "fn": lambda **kw: tool_move_file(kw.get("src", "") or kw.get("path", ""), kw.get("dst", "") or kw.get("dest", "") or kw.get("new_path", ""), workspace=ws),
+        },
+        "git_status": {
+            "description": "Show git status --short --branch and current branch.",
+            "params": [],
+            "fn": lambda **kw: tool_git_status(workspace=ws),
+        },
+        "git_diff": {
+            "description": "Show git diff (or diff for a single file).",
+            "params": ["path"],
+            "fn": lambda **kw: tool_git_diff(kw.get("path", ""), workspace=ws),
+        },
+        "todo_write": {
+            "description": "Create or update the task checklist for this session.",
+            "params": ["todos"],
+            "fn": lambda **kw: {"success": True, "output": "Todo list updated (handled by loop)"},
+        },
+     }

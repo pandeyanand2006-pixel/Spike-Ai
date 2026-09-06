@@ -2459,23 +2459,130 @@ sendAgent = async function(text) {
     if (sid) { agentSessionId=sid; localStorage.setItem("spike_agent_session", sid); }
     const reader=res.body.getReader(); const decoder=new TextDecoder(); let buffer="";
     while(true){ const{value,done}=await reader.read(); if(done) break; buffer+=decoder.decode(value,{stream:true}); let nl; while((nl=buffer.indexOf("\n"))!==-1){ const line=buffer.slice(0,nl).trim(); buffer=buffer.slice(nl+1); if(!line) continue; let ev; try{ev=JSON.parse(line);}catch(e){continue;}
+      // AGENT EVENTS: session_started, project_loaded, todo_update, thinking, tool_start, tool_result, command_started, command_result, file_changed, approval_required, error, completed, session_ended
       if(ev.type==="session_started"){ if(ev.sessionId){agentSessionId=ev.sessionId; localStorage.setItem("spike_agent_session",ev.sessionId);} loadAgentSessions(); }
       else if(ev.type==="project_loaded"){ /* could show */ }
+      else if(ev.type==="todo_update"){ renderBackendTodos(ev.todos||[]); }
       else if(ev.type==="thinking"){ setAgentStatus("thinking"); }
       else if(ev.type==="tool_start"){ setAgentStatus("working"); const el=appendAgentTool(ev.tool, ev.input, "running"); pendingTools.set(ev.tool+JSON.stringify(ev.input), el); markTodoActive(); }
       else if(ev.type==="tool_result"){ const key=ev.tool+JSON.stringify(ev.input||{}); let el=pendingTools.get(key); if(!el){ const tools=agentMessages.querySelectorAll('.agent-tool'); for(let i=tools.length-1;i>=0;i--) if(tools[i].dataset.tool===ev.tool){ el={wrap:tools[i], body:tools[i].querySelector(".agent-tool-body"), badge:tools[i].querySelector(".tool-status")}; break; } } if(el&&el.badge){ el.badge.textContent=ev.success?"✓ done":"✗ failed"; el.badge.className="tool-status "+(ev.success?"ok":"err"); } if(el&&el.body){ el.body.textContent=(ev.output||"").slice(0,6000); el.body.classList.remove("collapsed"); } }
       else if(ev.type==="command_started"){ setAgentStatus("working"); }
       else if(ev.type==="command_result"){ appendAgentTerminal(ev.command||"", ev.output||"", !!ev.success); }
-      else if(ev.type==="file_changed"){ appendAgentFileChange(ev.path); updateTodoForFile(ev.path); refreshExplorer(); }
-      else if(ev.type==="approval_required"){ appendAgentApproval(ev.tool, ev.input, ev.reason); }
-      else if(ev.type==="completed"){ completeAllTodos(); appendAgentBubble("assistant", renderMarkdown(ev.content||"")); setAgentStatus("completed"); setTimeout(()=>setAgentStatus("ready"),1800); }
-      else if(ev.type==="error"){ appendAgentBubble("assistant", '<p style="color:#ef4444">⚠️ '+escapeHtml(ev.message||"Agent error")+'</p>'); setAgentStatus("error"); }
+      else if(ev.type==="file_changed"){ appendAgentFileChange(ev.path); updateTodoForFile(ev.path); refreshExplorerLive(); }
+      else if(ev.type==="approval_required"){ appendAgentApprovalReal(ev.tool, ev.input, ev.reason); }
+      else if(ev.type==="completed"){ completeAllTodos(); appendAgentBubble("assistant", renderMarkdown(ev.content||"")); setAgentStatus("completed"); maybeShowApproveBuildButton(); setTimeout(()=>setAgentStatus("ready"),1800); }
+      else if(ev.type==="error"){ appendAgentBubble("assistant", '<p style="color:#ef4444">⚠️ '+escapeHtml(ev.message||"Agent error")+'</p>'); setAgentStatus("error"); maybeShowContinueButton(); }
       else if(ev.type==="session_ended"){ loadAgentSessions(); }
     } }
     if(buffer.trim()){ try{ const ev=JSON.parse(buffer.trim()); if(ev.type==="completed"&&ev.content) appendAgentBubble("assistant", renderMarkdown(ev.content)); }catch(e){} }
   } catch(err){ if(err.name==="AbortError"){ appendAgentBubble("assistant", '<p style="color:var(--muted)"><em>Stopped by user.</em></p>'); setAgentStatus("ready"); } else { appendAgentBubble("assistant", '<p style="color:#ef4444">⚠️ '+escapeHtml(err.message||"Agent failed")+'</p>'); setAgentStatus("error"); } }
-  finally{ agentBusy=false; if(agentSend) agentSend.disabled=false; if(agentStopBtn) agentStopBtn.hidden=true; agentController=null; if(agentStatus&&agentStatus.textContent.includes("Thinking")) setAgentStatus("ready"); scrollAgentBottom(); refreshExplorer(); }
+  finally{ agentBusy=false; if(agentSend) agentSend.disabled=false; if(agentStopBtn) agentStopBtn.hidden=true; agentController=null; if(agentStatus&&agentStatus.textContent.includes("Thinking")) setAgentStatus("ready"); scrollAgentBottom(); refreshExplorerLive(); }
 };
+
+// --- Helpers for Phase 2/3/6: backend-driven todos, real approval, live refresh, continue/build ---
+function renderBackendTodos(todos){
+  const box = document.getElementById("agent-todo");
+  const list = document.getElementById("todo-list");
+  const prog = document.getElementById("todo-progress");
+  if(!box||!list) return;
+  if(!todos||!todos.length){ box.hidden=true; return; }
+  box.hidden=false;
+  list.innerHTML="";
+  let done=0;
+  todos.forEach(t=>{
+    const div=document.createElement("div");
+    div.className="todo-item "+t.status;
+    const icon=t.status==="completed"?"✓":t.status==="in_progress"?"●":"○";
+    div.innerHTML='<span class="todo-check">'+icon+'</span><span>'+escapeHtml(t.content||t.id||"")+'</span>';
+    list.appendChild(div);
+    if(t.status==="completed") done++;
+  });
+  if(prog) prog.textContent=done+"/"+todos.length;
+  // keep global todoItems in sync for legacy markTodoActive
+  try{ todoItems=todos.map(t=>({id:t.id, text:t.content, status: t.status==="completed"?"done":t.status})); renderTodo(); }catch(e){}
+}
+function refreshExplorerLive(){
+  // Phase 6: refresh file tree whenever file_changed arrives
+  try{ refreshExplorer(); }catch(e){}
+  // also update the #composer-files hint if needed
+}
+function appendAgentApprovalReal(tool, input, reason){
+  hideAgentEmpty();
+  const wrap=document.createElement("div");
+  wrap.className="agent-approval";
+  wrap.innerHTML='<p><strong>⚠ Approval required</strong></p><p>'+escapeHtml(reason||"This action needs confirmation.")+'</p><p><code>'+escapeHtml(tool)+' '+escapeHtml(JSON.stringify(input))+'</code></p>';
+  const actions=document.createElement("div"); actions.className="agent-approval-actions";
+  const allow=document.createElement("button"); allow.className="approval-btn allow"; allow.textContent="Allow";
+  const deny=document.createElement("button"); deny.className="approval-btn cancel"; deny.textContent="Deny";
+  allow.addEventListener("click", async ()=>{
+    allow.disabled=true; deny.disabled=true; allow.textContent="Approving…";
+    try{
+      const r=await fetch("/api/agent/sessions/"+agentSessionId+"/approve",{method:"POST",headers:authHeaders(),body:JSON.stringify({approve:true})});
+      if(!r.ok) throw new Error("Approve failed");
+      const d=await r.json();
+      wrap.remove();
+      toast("Approved — executing");
+      // If backend executed immediately, show result; otherwise stream will resume
+      if(d.result && d.result.output){ appendAgentTerminal(tool, d.result.output, !!d.result.success); }
+    }catch(e){ toast(e.message); allow.disabled=false; deny.disabled=false; allow.textContent="Allow"; }
+  });
+  deny.addEventListener("click", async ()=>{
+    allow.disabled=true; deny.disabled=true; deny.textContent="Denying…";
+    try{
+      await fetch("/api/agent/sessions/"+agentSessionId+"/approve",{method:"POST",headers:authHeaders(),body:JSON.stringify({approve:false})});
+      wrap.remove(); toast("Denied — agent will propose alternative");
+    }catch(e){ toast(e.message); allow.disabled=false; deny.disabled=false; deny.textContent="Deny"; }
+  });
+  actions.appendChild(allow); actions.appendChild(deny);
+  wrap.appendChild(actions);
+  agentMessages.appendChild(wrap);
+  scrollAgentBottom();
+}
+function maybeShowApproveBuildButton(){
+  // After Plan completes with todos, show Approve & Build
+  try{
+    const box=document.getElementById("agent-todo");
+    if(!box || box.hidden) return;
+    if(agentMode!=="plan") return;
+    if(document.getElementById("approve-build-btn")) return;
+    const btn=document.createElement("button");
+    btn.id="approve-build-btn"; btn.className="approval-btn allow"; btn.style.margin="8px auto"; btn.style.display="block";
+    btn.textContent="Approve & Build";
+    btn.addEventListener("click", async ()=>{
+      btn.disabled=true; btn.textContent="Starting build…";
+      try{
+        const res=await fetch("/api/agent/sessions/"+agentSessionId+"/build",{method:"POST",headers:authHeaders()});
+        if(!res.ok){ const e=await res.json().catch(()=>({detail:"Build failed"})); throw new Error(e.detail||"Build failed"); }
+        // Stream the build response like normal
+        const reader=res.body.getReader(); const dec=new TextDecoder(); let buf="";
+        setAgentStatus("working");
+        while(true){ const{value,done}=await reader.read(); if(done) break; buf+=dec.decode(value,{stream:true}); let nl; while((nl=buf.indexOf("\n"))!==-1){ const line=buf.slice(0,nl).trim(); buf=buf.slice(nl+1); if(!line) continue; let ev; try{ev=JSON.parse(line);}catch(e){continue;} if(ev.type==="todo_update") renderBackendTodos(ev.todos); else if(ev.type==="tool_start"){ const el=appendAgentTool(ev.tool, ev.input, "running"); } else if(ev.type==="tool_result"){ /* handled */ } else if(ev.type==="file_changed"){ appendAgentFileChange(ev.path); refreshExplorerLive(); } else if(ev.type==="completed"){ appendAgentBubble("assistant", renderMarkdown(ev.content||"")); setAgentStatus("completed"); } else if(ev.type==="error"){ appendAgentBubble("assistant", '<p style="color:#ef4444">⚠️ '+escapeHtml(ev.message||"Agent error")+'</p>'); }
+        } }
+        btn.remove();
+      }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="Approve & Build"; }
+    });
+    box.after(btn);
+  }catch(e){}
+}
+function maybeShowContinueButton(){
+  if(document.getElementById("continue-btn")) return;
+  const btn=document.createElement("button");
+  btn.id="continue-btn"; btn.className="approval-btn allow"; btn.style.margin="8px auto"; btn.style.display="block";
+  btn.textContent="Continue";
+  btn.addEventListener("click", async ()=>{
+    btn.disabled=true; btn.textContent="Continuing…";
+    try{
+      const res=await fetch("/api/agent/sessions/"+agentSessionId+"/continue",{method:"POST",headers:authHeaders()});
+      if(!res.ok) throw new Error("Continue failed");
+      const reader=res.body.getReader(); const dec=new TextDecoder(); let buf="";
+      while(true){ const{value,done}=await reader.read(); if(done) break; buf+=dec.decode(value,{stream:true}); let nl; while((nl=buf.indexOf("\n"))!==-1){ const line=buf.slice(0,nl).trim(); buf=buf.slice(nl+1); if(!line) continue; let ev; try{ev=JSON.parse(line);}catch(e){continue;} if(ev.type==="todo_update") renderBackendTodos(ev.todos); else if(ev.type==="completed"){ appendAgentBubble("assistant", renderMarkdown(ev.content||"")); }
+      } }
+      btn.remove();
+    }catch(e){ toast(e.message); btn.disabled=false; btn.textContent="Continue"; }
+  });
+  // Append after last message
+  try{ agentMessages.appendChild(btn); scrollAgentBottom(); }catch(e){}
+}
 
 // Wiring for + menu and modals
 if (addChatBtn && addPopover) {
