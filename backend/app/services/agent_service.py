@@ -77,6 +77,53 @@ For web projects (calculator, dashboard, etc.): create real files live in the wo
 MAX_STEPS = 40
 MAX_LLM_RETRIES = 2
 
+# ---------- Model fallback / daily-cap tracking (Fix #1) ----------
+import time as _time
+from datetime import datetime, timezone as _tz
+
+_daily_exhausted: Dict[str, float] = {}  # model -> expiry timestamp (seconds since epoch)
+
+
+def _next_midnight_ts() -> float:
+    now = datetime.now(_tz.utc)
+    # next UTC midnight
+    tomorrow = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    # if we are already past midnight today, tomorrow is +1 day
+    import datetime as _dt
+    tomorrow = tomorrow + _dt.timedelta(days=1)
+    return tomorrow.timestamp()
+
+
+def _is_exhausted(model: str) -> bool:
+    exp = _daily_exhausted.get(model)
+    if exp is None:
+        return False
+    if _time.time() < exp:
+        return True
+    # expired — clear
+    _daily_exhausted.pop(model, None)
+    return False
+
+
+def _mark_exhausted(model: str, err_text: str):
+    low = (err_text or "").lower()
+    is_tpd = "tokens per day" in low or "tpd" in low or "per day" in low
+    is_tpm = "tokens per minute" in low or "tpm" in low or "per minute" in low
+    if is_tpd:
+        _daily_exhausted[model] = _next_midnight_ts()
+    elif is_tpm:
+        # per-minute: short backoff, not daily
+        _daily_exhausted[model] = _time.time() + 65
+    else:
+        # generic rate_limit_exceeded without detail — treat as per-minute
+        if "rate_limit" in low or "429" in low:
+            _daily_exhausted[model] = _time.time() + 65
+
+
+def _is_tpd_error(text: str) -> bool:
+    low = (text or "").lower()
+    return "tokens per day" in low or " tpd" in low
+
 
 def build_system_prompt(mode: str) -> str:
     base = AGENT_SYSTEM_PROMPT
@@ -168,7 +215,7 @@ def _recover_from_failed_generation(exc: Exception) -> Optional[List[Dict[str, A
     return [{"id": "recovered_0", "name": tool_name, "arguments": params}]
 
 
-# ---------- Native tool-calling LLM helper (streaming) ----------
+# ---------- Native tool-calling LLM helper (streaming) with fallback chain ----------
 
 async def call_llm_with_tools(
     messages: List[Dict[str, Any]],
@@ -176,18 +223,25 @@ async def call_llm_with_tools(
     stream_callback=None,
     _retry_for_recovery: bool = True,
 ) -> tuple[str, List[Dict[str, Any]]]:
-    """Call Groq with native tools, optionally streaming live deltas.
+    """Call Groq with native tools, with model fallback on TPD/rate-limit.
 
-    Returns (content_text, tool_calls) where tool_calls is a list of
-    {id, name, arguments: dict}. Streaming deltas are forwarded via
-    stream_callback(content_delta) if provided.
+    Falls back through model_fallback_chain when a model hits its daily token
+    quota (TPD) — tracked in _daily_exhausted so we don't retry it every request.
+    On per-minute limit, retries once after short wait. If all models exhausted,
+    returns a distinct ALL_MODELS_EXHAUSTED error string so the caller can set
+    session status to error (resumable via /continue) and the UI can show a clear
+    message instead of raw dump.
     """
     settings = get_settings()
-    mdl = model or settings.model
+    # Build effective fallback chain
+    chain = list(getattr(settings, "model_fallback_chain", [settings.model]))
+    if model and model not in chain:
+        chain = [model] + [m for m in chain if m != model]
+    # Remove exhausted models for this calendar day (but keep at least one)
+    available = [m for m in chain if not _is_exhausted(m)]
+    if not available:
+        return "ALL_MODELS_EXHAUSTED: All models are at today's usage limit — try again later (daily quota resets at UTC midnight).", []
 
-    # Phase 5: larger max_tokens for file-heavy turns (heuristic: if history
-    # mentions write_file/edit_file intent, allow 4000; else 900)
-    # For now we use a simple heuristic on last user message length
     last_user = ""
     for m in reversed(messages):
         if m.get("role") == "user" and m.get("content"):
@@ -196,150 +250,164 @@ async def call_llm_with_tools(
     wants_write = "write_file" in last_user.lower() or "edit_file" in last_user.lower() or len(last_user) > 800
     max_tokens = 4000 if wants_write else 900
 
-    try:
-        # Try streaming first (gives live token feed)
-        stream = await ai_service.client.chat.completions.create(
-            model=mdl,
-            messages=messages,
-            tools=TOOL_SCHEMAS,
-            tool_choice="auto",
-            temperature=0.35,
-            max_tokens=max_tokens,
-            stream=True,
-        )
-        content_acc = ""
-        tool_calls_acc: Dict[int, Dict[str, Any]] = {}
-        async for chunk in stream:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            if delta.content:
-                content_acc += delta.content
-                if stream_callback:
-                    try:
-                        await stream_callback(delta.content)
-                    except Exception:
-                        pass
-            if getattr(delta, "tool_calls", None):
-                for tc in delta.tool_calls:
-                    idx = getattr(tc, "index", 0) or 0
-                    if idx not in tool_calls_acc:
-                        tool_calls_acc[idx] = {"id": "", "name": "", "args": ""}
-                    if getattr(tc, "id", None):
-                        tool_calls_acc[idx]["id"] = tc.id
-                    func = getattr(tc, "function", None)
-                    if func:
-                        if getattr(func, "name", None):
-                            tool_calls_acc[idx]["name"] += func.name
-                        if getattr(func, "arguments", None):
-                            tool_calls_acc[idx]["args"] += func.arguments
-        # Parse accumulated tool calls
-        tool_calls: List[Dict[str, Any]] = []
-        for _idx in sorted(tool_calls_acc.keys()):
-            entry = tool_calls_acc[_idx]
-            name = (entry.get("name") or "").strip()
-            if not name:
-                continue
-            args_str = entry.get("args") or "{}"
-            try:
-                args = json.loads(args_str) if args_str else {}
-            except Exception:
-                # Malformed JSON fallback: try to fix trailing
-                try:
-                    args = json.loads(args_str + "}")
-                except Exception:
-                    args = {}
-            tool_calls.append({"id": entry.get("id") or f"call_{_idx}", "name": name, "arguments": args if isinstance(args, dict) else {}})
-        return content_acc.strip(), tool_calls
-    except Exception as e:
-        err = str(e)
-        # --- Fix 2: resilient catch + repair for Groq tool_use_failed (400) ---
-        if _retry_for_recovery and ("tool_use_failed" in err or "Failed to call a function" in err):
-            recovered = _recover_from_failed_generation(e)
-            if recovered:
-                return "", recovered
-            # One stricter retry, not infinite
-            try:
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "Your last tool call failed because the content was too large or "
-                        "malformed. Retry the SAME edit but split it into a smaller "
-                        "edit_file call (under 100 lines) targeting one small, unique "
-                        "anchor string."
-                    ),
-                })
-                return await call_llm_with_tools(messages, model=model, stream_callback=stream_callback, _retry_for_recovery=False)
-            except Exception:
-                pass
-        # Fallback to non-streaming if streaming not supported
-        msg = str(e)
-        if "429" in msg or "rate_limit" in msg.lower() or "OTPM" in msg:
-            try:
-                # Retry with smaller window
-                resp = await ai_service.client.chat.completions.create(
-                    model=mdl,
-                    messages=messages[-6:],
-                    tools=TOOL_SCHEMAS,
-                    tool_choice="auto",
-                    temperature=0.35,
-                    max_tokens=600,
-                )
-                m = resp.choices[0].message
-                text = (m.content or "").strip()
-                tcs = []
-                if getattr(m, "tool_calls", None):
-                    for tc in m.tool_calls:
-                        try:
-                            args = json.loads(tc.function.arguments or "{}")
-                        except Exception:
-                            args = {}
-                        tcs.append({"id": tc.id, "name": tc.function.name, "arguments": args if isinstance(args, dict) else {}})
-                return text, tcs
-            except Exception as e2:
-                return f"LLM error: {e2}", []
-        # Try non-streaming direct (also guarded for tool_use_failed)
+    last_err: Optional[str] = None
+    for idx, mdl in enumerate(available):
         try:
-            resp = await ai_service.client.chat.completions.create(
+            stream = await ai_service.client.chat.completions.create(
                 model=mdl,
                 messages=messages,
                 tools=TOOL_SCHEMAS,
                 tool_choice="auto",
-                temperature=0.2,
+                temperature=0.35,
                 max_tokens=max_tokens,
+                stream=True,
             )
-            m = resp.choices[0].message
-            text = (m.content or "").strip()
-            tcs = []
-            if getattr(m, "tool_calls", None):
-                for tc in m.tool_calls:
+            content_acc = ""
+            tool_calls_acc: Dict[int, Dict[str, Any]] = {}
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    content_acc += delta.content
+                    if stream_callback:
+                        try:
+                            await stream_callback(delta.content)
+                        except Exception:
+                            pass
+                if getattr(delta, "tool_calls", None):
+                    for tc in delta.tool_calls:
+                        cidx = getattr(tc, "index", 0) or 0
+                        if cidx not in tool_calls_acc:
+                            tool_calls_acc[cidx] = {"id": "", "name": "", "args": ""}
+                        if getattr(tc, "id", None):
+                            tool_calls_acc[cidx]["id"] = tc.id
+                        func = getattr(tc, "function", None)
+                        if func:
+                            if getattr(func, "name", None):
+                                tool_calls_acc[cidx]["name"] += func.name
+                            if getattr(func, "arguments", None):
+                                tool_calls_acc[cidx]["args"] += func.arguments
+            tool_calls: List[Dict[str, Any]] = []
+            for _cidx in sorted(tool_calls_acc.keys()):
+                entry = tool_calls_acc[_cidx]
+                name = (entry.get("name") or "").strip()
+                if not name:
+                    continue
+                args_str = entry.get("args") or "{}"
+                try:
+                    args = json.loads(args_str) if args_str else {}
+                except Exception:
                     try:
-                        args = json.loads(tc.function.arguments or "{}")
+                        args = json.loads(args_str + "}")
                     except Exception:
                         args = {}
-                    tcs.append({"id": tc.id, "name": tc.function.name, "arguments": args if isinstance(args, dict) else {}})
-            return text, tcs
-        except Exception as e2:
-            err2 = str(e2)
-            if _retry_for_recovery and ("tool_use_failed" in err2 or "Failed to call a function" in err2):
-                recovered2 = _recover_from_failed_generation(e2)
-                if recovered2:
-                    return "", recovered2
-                if _retry_for_recovery:
-                    try:
-                        messages.append({
-                            "role": "user",
-                            "content": (
-                                "Your last tool call failed because the content was too large or "
-                                "malformed. Retry the SAME edit but split it into a smaller "
-                                "edit_file call (under 100 lines) targeting one small, unique "
-                                "anchor string."
-                            ),
-                        })
-                        return await call_llm_with_tools(messages, model=model, stream_callback=stream_callback, _retry_for_recovery=False)
-                    except Exception:
-                        pass
-            return f"LLM error: {e2}", []
+                tool_calls.append({"id": entry.get("id") or f"call_{_cidx}", "name": name, "arguments": args if isinstance(args, dict) else {}})
+            return content_acc.strip(), tool_calls
+        except Exception as e:
+            err = str(e)
+            last_err = err
+            # tool_use_failed recovery (before rate-limit fallback)
+            if _retry_for_recovery and ("tool_use_failed" in err or "Failed to call a function" in err):
+                recovered = _recover_from_failed_generation(e)
+                if recovered:
+                    return "", recovered
+                try:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your last tool call failed because the content was too large or "
+                            "malformed. Retry the SAME edit but split it into a smaller "
+                            "edit_file call (under 100 lines) targeting one small, unique "
+                            "anchor string."
+                        ),
+                    })
+                    return await call_llm_with_tools(messages, model=model, stream_callback=stream_callback, _retry_for_recovery=False)
+                except Exception:
+                    pass
+            # Rate limit handling
+            is_rl = "429" in err or "rate_limit" in err.lower() or "rateLimit" in err
+            if is_rl:
+                # Mark and decide TPD vs TPM
+                _mark_exhausted(mdl, err)
+                is_tpd = _is_tpd_error(err)
+                if is_tpd:
+                    # Daily cap — try next model immediately
+                    continue
+                # Per-minute: wait once then retry same model once, else next model
+                try:
+                    await asyncio.sleep(7)
+                    # one retry of same model non-streaming with smaller window
+                    resp = await ai_service.client.chat.completions.create(
+                        model=mdl,
+                        messages=messages[-6:],
+                        tools=TOOL_SCHEMAS,
+                        tool_choice="auto",
+                        temperature=0.35,
+                        max_tokens=600,
+                    )
+                    m = resp.choices[0].message
+                    text = (m.content or "").strip()
+                    tcs = []
+                    if getattr(m, "tool_calls", None):
+                        for tc in m.tool_calls:
+                            try:
+                                args = json.loads(tc.function.arguments or "{}")
+                            except Exception:
+                                args = {}
+                            tcs.append({"id": tc.id, "name": tc.function.name, "arguments": args if isinstance(args, dict) else {}})
+                    return text, tcs
+                except Exception as e2:
+                    # if retry also rate-limited, mark and move to next model
+                    if "429" in str(e2) or "rate_limit" in str(e2).lower():
+                        _mark_exhausted(mdl, str(e2))
+                    continue
+            # Non-rate-limit error: try next model only if we have one and error looks model-specific
+            # For tool_use_failed we already handled; for other errors, don't fallback aggressively
+            if idx < len(available) - 1 and ("tool_use_failed" not in err and "LLM error" not in err):
+                # For generic errors, don't exhaust chain — return immediately
+                break
+            # Fall through to try next model for rate-limit only; otherwise break
+            if not is_rl:
+                break
+            continue
+
+    # If we exhausted all models due to TPD
+    if last_err and ("tokens per day" in last_err.lower() or "tpd" in last_err.lower()):
+        return "ALL_MODELS_EXHAUSTED: All models are at today's usage limit — try again later (daily quota resets at UTC midnight). Daily use: " + last_err[:200], []
+    # Generic fallback: try non-streaming once on first available model
+    mdl = available[0] if available else chain[0]
+    try:
+        resp = await ai_service.client.chat.completions.create(
+            model=mdl,
+            messages=messages,
+            tools=TOOL_SCHEMAS,
+            tool_choice="auto",
+            temperature=0.2,
+            max_tokens=max_tokens,
+        )
+        m = resp.choices[0].message
+        text = (m.content or "").strip()
+        tcs = []
+        if getattr(m, "tool_calls", None):
+            for tc in m.tool_calls:
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                except Exception:
+                    args = {}
+                tcs.append({"id": tc.id, "name": tc.function.name, "arguments": args if isinstance(args, dict) else {}})
+        return text, tcs
+    except Exception as e2:
+        err2 = str(e2)
+        if _retry_for_recovery and ("tool_use_failed" in err2 or "Failed to call a function" in err2):
+            recovered2 = _recover_from_failed_generation(e2)
+            if recovered2:
+                return "", recovered2
+        if "429" in err2 or "rate_limit" in err2.lower():
+            _mark_exhausted(mdl, err2)
+            if _is_tpd_error(err2):
+                return "ALL_MODELS_EXHAUSTED: All models are at today's usage limit — try again later.", []
+        return f"LLM error: {e2}", []
 
 
 async def execute_tool(tool: str, inp: Dict[str, Any], mode: str, workspace: Path | None = None, project_info: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -476,7 +544,7 @@ async def stream_agent_loop(
 
         # If we got live content but no tools, it's a final answer
         if not tool_calls:
-            if not content or content.startswith("LLM error"):
+            if not content or content.startswith("LLM error") or content.startswith("ALL_MODELS_EXHAUSTED"):
                 yield {"type": "error", "message": content or "Empty LLM response"}
                 break
             yield {"type": "completed", "content": content, "changedFiles": changed_files}

@@ -15,10 +15,40 @@ class AIService:
         settings = get_settings()
         self.client = AsyncGroq(api_key=settings.groq_api_key)
         self.default_model = settings.model
+        self._daily_exhausted: dict = {}
 
     @property
     def _api_key_present(self) -> bool:
         return bool(get_settings().groq_api_key)
+
+    def _is_exhausted(self, model: str) -> bool:
+        import time as _time
+        exp = self._daily_exhausted.get(model)
+        if exp is None:
+            return False
+        if _time.time() < exp:
+            return True
+        self._daily_exhausted.pop(model, None)
+        return False
+
+    def _mark_exhausted(self, model: str, err_text: str):
+        import time as _time
+        from datetime import datetime, timezone as _tz, timedelta as _td
+        low = (err_text or "").lower()
+        is_tpd = "tokens per day" in low or " tpd" in low
+        if is_tpd:
+            now = datetime.now(_tz.utc)
+            nxt = now.replace(hour=0, minute=0, second=0, microsecond=0) + _td.timedelta(days=1)
+            self._daily_exhausted[model] = nxt.timestamp()
+        elif "tokens per minute" in low or "tpm" in low or "rate_limit" in low or "429" in low:
+            self._daily_exhausted[model] = _time.time() + 65
+
+    def _fallback_chain(self, model: Optional[str]) -> list:
+        settings = get_settings()
+        chain = list(getattr(settings, "model_fallback_chain", [settings.model]))
+        if model and model not in chain:
+            chain = [model] + [m for m in chain if m != model]
+        return [m for m in chain if not self._is_exhausted(m)] or chain
 
     def build_history(self, messages: List[dict], system_prompt: str) -> List[dict]:
         history = [{"role": "system", "content": system_prompt}]
@@ -46,16 +76,36 @@ class AIService:
             raise HTTPException(
                 status_code=503, detail="AI service is not configured."
             )
-        try:
-            completion = await self.client.chat.completions.create(
-                model=model or self.default_model,
-                messages=self.build_history(messages, system_prompt or get_settings().system_prompt),
-                temperature=temperature,
-                max_tokens=900,
-            )
-            return completion.choices[0].message.content or ""
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"AI service error: {e}")
+        chain = self._fallback_chain(model)
+        last_err = None
+        for mdl in chain:
+            try:
+                completion = await self.client.chat.completions.create(
+                    model=mdl,
+                    messages=self.build_history(messages, system_prompt or get_settings().system_prompt),
+                    temperature=temperature,
+                    max_tokens=900,
+                )
+                return completion.choices[0].message.content or ""
+            except Exception as e:
+                last_err = str(e)
+                is_rl = "429" in last_err or "rate_limit" in last_err.lower()
+                if is_rl:
+                    self._mark_exhausted(mdl, last_err)
+                    if "tokens per day" in last_err.lower() or "tpd" in last_err.lower():
+                        continue
+                    # per-minute: wait once then try next model
+                    import asyncio as _aio
+                    try:
+                        await _aio.sleep(7)
+                    except Exception:
+                        pass
+                    continue
+                raise HTTPException(status_code=502, detail=f"AI service error: {e}")
+        # all exhausted
+        if last_err and ("tokens per day" in last_err.lower() or "tpd" in last_err.lower()):
+            raise HTTPException(status_code=503, detail="ALL_MODELS_EXHAUSTED: All models are at today's usage limit — try again later")
+        raise HTTPException(status_code=502, detail=f"AI service error: {last_err}")
 
     async def stream(
         self,
@@ -68,20 +118,41 @@ class AIService:
             raise HTTPException(
                 status_code=503, detail="AI service is not configured."
             )
-        try:
-            stream = await self.client.chat.completions.create(
-                model=model or self.default_model,
-                messages=self.build_history(messages, system_prompt or get_settings().system_prompt),
-                temperature=temperature,
-                max_tokens=900,
-                stream=True,
-            )
-            async for chunk in stream:
-                delta = chunk.choices[0].delta.content
-                if delta:
-                    yield delta
-        except Exception as e:
-            yield f"\n\n[Error: {e}]"
+        chain = self._fallback_chain(model)
+        last_err = None
+        for mdl in chain:
+            try:
+                stream = await self.client.chat.completions.create(
+                    model=mdl,
+                    messages=self.build_history(messages, system_prompt or get_settings().system_prompt),
+                    temperature=temperature,
+                    max_tokens=900,
+                    stream=True,
+                )
+                async for chunk in stream:
+                    delta = chunk.choices[0].delta.content
+                    if delta:
+                        yield delta
+                return
+            except Exception as e:
+                last_err = str(e)
+                is_rl = "429" in last_err or "rate_limit" in last_err.lower()
+                if is_rl:
+                    self._mark_exhausted(mdl, last_err)
+                    if "tokens per day" in last_err.lower() or "tpd" in last_err.lower():
+                        continue
+                    import asyncio as _aio
+                    try:
+                        await _aio.sleep(7)
+                    except Exception:
+                        pass
+                    continue
+                yield f"\n\n[Error: {e}]"
+                return
+        if last_err and ("tokens per day" in last_err.lower() or "tpd" in last_err.lower()):
+            yield "\n\n[ALL_MODELS_EXHAUSTED: All models are at today's usage limit — try again later]"
+        elif last_err:
+            yield f"\n\n[Error: {last_err}]"
 
     async def vision_complete(
         self, text: str, image_data_url: str, max_tokens: int = 2000

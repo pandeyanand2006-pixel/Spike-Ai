@@ -28,6 +28,16 @@ class Settings:
         self.groq_api_key = os.getenv("GROQ_API_KEY", "")
         # qwen/qwen3.8-27b is not reliably tool-use-tuned; llama-3.3 is well-tested for function calling
         self.model = os.getenv("MODEL", "llama-3.3-70b-versatile")
+        # Fallback chain ordered by daily-quota headroom; checked in Groq console
+        _primary = self.model
+        _fallbacks = ["llama-3.1-8b-instant", "qwen/qwen3.8-27b", "llama-3.3-70b-versatile"]
+        seen = set()
+        chain = []
+        for m in [_primary] + _fallbacks:
+            if m and m not in seen:
+                seen.add(m)
+                chain.append(m)
+        self.model_fallback_chain = chain
 
         # Security
         self.jwt_secret = os.getenv("JWT_SECRET", "change-me-in-production")

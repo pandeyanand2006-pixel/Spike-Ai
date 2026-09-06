@@ -165,13 +165,14 @@ async def approve_session(session_id: str, body: ApproveBody, user: dict = Depen
 
 @router.post("/sessions/{session_id}/continue")
 async def continue_session(session_id: str, user: dict = Depends(get_current_user)):
-    """Resume a stopped or step-limited session (Phase 3). Returns streaming NDJSON."""
+    """Resume a stopped/error/step-limited session (Phase 3). Returns streaming NDJSON."""
     doc = await agent_store.get_agent_session(user["id"], session_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Agent session not found.")
     status = doc.get("status", "active")
-    if status not in ("stopped", "active", "completed"):
-        raise HTTPException(status_code=400, detail=f"Cannot continue session in status {status}")
+    if status == "completed":
+        raise HTTPException(status_code=400, detail="Session already completed — cannot continue")
+    # allow active, stopped, error, or any non-completed
     project_id = str(doc.get("projectId")) if doc.get("projectId") else None
     if not project_id:
         raise HTTPException(status_code=400, detail="Session has no project.")
@@ -192,6 +193,8 @@ async def continue_session(session_id: str, user: dict = Depends(get_current_use
         yield json.dumps({"type": "project_loaded", "projectId": project_id, "project": project_info}) + "\n"
         full_assistant = []
         changed: list[str] = []
+        had_error = False
+        error_msg = ""
         try:
             async for ev in stream_agent_loop(
                 user_message="Continue where you left off. Resume the task.",
@@ -213,11 +216,16 @@ async def continue_session(session_id: str, user: dict = Depends(get_current_use
                         changed.append(ev["path"])
                 if ev.get("type") == "approval_required":
                     await agent_store.update_pending_approval(user["id"], session_id, ev)
+                if ev.get("type") == "error":
+                    had_error = True
+                    error_msg = ev.get("message", "")
                 if ev.get("type") == "completed" and ev.get("content"):
                     full_assistant.append(ev["content"])
                 yield json.dumps(ev) + "\n"
         except Exception as e:
-            yield json.dumps({"type": "error", "message": str(e)[:500]}) + "\n"
+            had_error = True
+            error_msg = str(e)[:500]
+            yield json.dumps({"type": "error", "message": error_msg}) + "\n"
         finally:
             if full_assistant:
                 txt = "\n".join(full_assistant)
@@ -225,6 +233,10 @@ async def continue_session(session_id: str, user: dict = Depends(get_current_use
                 if changed:
                     await agent_store.mark_changed_files(user["id"], session_id, changed)
                 await agent_store.update_agent_status(user["id"], session_id, "completed")
+            elif had_error:
+                await agent_store.update_agent_status(user["id"], session_id, "error")
+                if "ALL_MODELS_EXHAUSTED" in error_msg:
+                    await agent_store.append_tool_event(user["id"], session_id, {"type": "error", "message": error_msg})
             yield json.dumps({"type": "session_ended", "sessionId": session_id, "changedFiles": changed}) + "\n"
 
     return StreamingResponse(event_generator(), media_type="application/x-ndjson", headers={"X-Agent-Session-Id": session_id})
@@ -268,6 +280,8 @@ async def build_from_plan(session_id: str, user: dict = Depends(get_current_user
         yield json.dumps({"type": "project_loaded", "projectId": project_id, "project": project_info}) + "\n"
         full_assistant = []
         changed: list[str] = []
+        had_error = False
+        error_msg = ""
         try:
             async for ev in stream_agent_loop(
                 user_message=f"Approved plan with {len(todos)} steps — execute it now.",
@@ -289,11 +303,16 @@ async def build_from_plan(session_id: str, user: dict = Depends(get_current_user
                         changed.append(ev["path"])
                 if ev.get("type") == "approval_required":
                     await agent_store.update_pending_approval(user["id"], session_id, ev)
+                if ev.get("type") == "error":
+                    had_error = True
+                    error_msg = ev.get("message", "")
                 if ev.get("type") == "completed" and ev.get("content"):
                     full_assistant.append(ev["content"])
                 yield json.dumps(ev) + "\n"
         except Exception as e:
-            yield json.dumps({"type": "error", "message": str(e)[:500]}) + "\n"
+            had_error = True
+            error_msg = str(e)[:500]
+            yield json.dumps({"type": "error", "message": error_msg}) + "\n"
         finally:
             if full_assistant:
                 txt = "\n".join(full_assistant)
@@ -301,6 +320,10 @@ async def build_from_plan(session_id: str, user: dict = Depends(get_current_user
                 if changed:
                     await agent_store.mark_changed_files(user["id"], session_id, changed)
                 await agent_store.update_agent_status(user["id"], session_id, "completed")
+            elif had_error:
+                await agent_store.update_agent_status(user["id"], session_id, "error")
+                if "ALL_MODELS_EXHAUSTED" in error_msg:
+                    await agent_store.append_tool_event(user["id"], session_id, {"type": "error", "message": error_msg})
             yield json.dumps({"type": "session_ended", "sessionId": session_id, "changedFiles": changed}) + "\n"
 
     return StreamingResponse(event_generator(), media_type="application/x-ndjson", headers={"X-Agent-Session-Id": session_id})
@@ -381,6 +404,8 @@ async def agent_stream(req: AgentRequest, user: Optional[dict] = Depends(optiona
             yield json.dumps({"type": "project_loaded", "projectId": project_id, "project": project_info}) + "\n"
         full_assistant = []
         changed: list[str] = []
+        had_error = False
+        error_msg = ""
         try:
             async for ev in stream_agent_loop(
                 user_message=req.message, mode=mode, model=req.model, history=history, workspace=workspace, project_info=project_info, user_id=uid if not is_guest else None, project_id=project_id, existing_todos=existing_todos
@@ -396,20 +421,35 @@ async def agent_stream(req: AgentRequest, user: Optional[dict] = Depends(optiona
                 if ev.get("type") == "approval_required":
                     if not is_guest:
                         await agent_store.update_pending_approval(uid, session_id, ev)
+                if ev.get("type") == "error":
+                    had_error = True
+                    error_msg = ev.get("message", "")
                 if ev.get("type") == "completed" and ev.get("content"):
                     full_assistant.append(ev["content"])
                 yield json.dumps(ev) + "\n"
         except Exception as e:
-            yield json.dumps({"type": "error", "message": str(e)[:500]}) + "\n"
+            had_error = True
+            error_msg = str(e)[:500]
+            yield json.dumps({"type": "error", "message": error_msg}) + "\n"
         finally:
-            if not is_guest and full_assistant:
-                txt = "\n".join(full_assistant)
-                await agent_store.append_agent_message(uid, session_id, "assistant", txt[:10000])
-                if changed:
-                    await agent_store.mark_changed_files(uid, session_id, changed)
-                await agent_store.update_agent_status(uid, session_id, "completed")
-                if history is not None and changed:
+            if not is_guest:
+                # Mark inspected after first run (helps /continue skip re-inspect)
+                try:
                     await agent_store.set_inspected(uid, session_id, True)
+                except Exception:
+                    pass
+                if full_assistant:
+                    txt = "\n".join(full_assistant)
+                    await agent_store.append_agent_message(uid, session_id, "assistant", txt[:10000])
+                    if changed:
+                        await agent_store.mark_changed_files(uid, session_id, changed)
+                    await agent_store.update_agent_status(uid, session_id, "completed")
+                elif had_error:
+                    # Don't leave stuck in active — mark as error so Continue works
+                    await agent_store.update_agent_status(uid, session_id, "error")
+                    if "ALL_MODELS_EXHAUSTED" in error_msg:
+                        # also surface a tool event for UI
+                        await agent_store.append_tool_event(uid, session_id, {"type": "error", "message": error_msg})
             yield json.dumps({"type": "session_ended", "sessionId": session_id, "changedFiles": changed}) + "\n"
 
     return StreamingResponse(event_generator(), media_type="application/x-ndjson", headers={"X-Agent-Session-Id": session_id})

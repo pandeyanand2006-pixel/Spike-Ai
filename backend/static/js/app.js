@@ -911,19 +911,36 @@ function newChat() {
   }
 }
 
-/* ---------- Status ---------- */
-function checkHealth() {
-  fetch("/api/health")
-    .then((r) => r.json())
-    .then((d) => {
-      statusEl.className = "status " + (d.status === "ok" ? "online" : "error");
-      statusEl.textContent = "";
-    })
-    .catch(() => {
-      statusEl.className = "status error";
-      statusEl.textContent = "";
-    });
+/* ---------- Status — with exponential backoff (Fix #4) ---------- */
+let healthDelay = 30000;
+let healthTimer = null;
+function scheduleHealth(delay) {
+  clearTimeout(healthTimer);
+  healthTimer = setTimeout(pollHealth, delay);
 }
+async function pollHealth() {
+  try {
+    const r = await fetch("/api/health");
+    if (!r.ok) throw new Error("health not ok");
+    const d = await r.json();
+    statusEl.className = "status " + (d.status === "ok" ? "online" : "error");
+    statusEl.title = d.status === "ok" ? "Online" : "Health check failed";
+    statusEl.textContent = "";
+    statusEl.classList.remove("reconnecting");
+    healthDelay = 30000;
+  } catch {
+    statusEl.className = "status error reconnecting";
+    statusEl.title = "Reconnecting… (server waking up or offline)";
+    statusEl.textContent = "";
+    healthDelay = Math.min(healthDelay * 2, 60000);
+    // also update composer bridge chip to show reconnecting
+    const cb = document.getElementById("composer-bridge");
+    if (cb) { cb.textContent = "↻ Reconnecting…"; cb.title = "Server reconnecting — Render may be waking up"; }
+  } finally {
+    scheduleHealth(healthDelay);
+  }
+}
+function checkHealth() { return pollHealth(); }
 
 /* ---------- Theme toggle ---------- */
 const themeBtn = document.getElementById("theme-btn");
@@ -1694,8 +1711,7 @@ async function verifyAndEnter(token) {
 async function init() {
   applyTheme(localStorage.getItem(THEME_KEY) || "light");
   renderConversation();
-  checkHealth();
-  setInterval(checkHealth, 30000);
+  pollHealth();
   refreshAuthConfig();
 
   // Start in loading state: hide both chat and auth behind opaque overlay.
@@ -2733,37 +2749,76 @@ init();
     return !!(p && (p.local || (p.workspace || "").indexOf("local:") === 0));
   }
 
-  /* ---------- Bridge status ---------- */
+  /* ---------- Bridge status — with backoff (Fix #4) ---------- */
+  let bridgePollDelay = 30000;
+  let bridgePollTimer = null;
+  function scheduleBridgePoll(delay) {
+    clearTimeout(bridgePollTimer);
+    bridgePollTimer = setTimeout(pollBridge, delay);
+  }
+  async function doRefreshBridgeStatus() {
+    if (!getToken()) {
+      bridgeOnline = false;
+      if (bridgeStatusEl) bridgeStatusEl.classList.remove("online");
+      if (bridgeStatusText) bridgeStatusText.textContent = "○ Offline — sign in to check";
+      if (composerBridge) { composerBridge.textContent = "○ Offline"; composerBridge.classList.remove("online"); composerBridge.classList.add("offline"); composerBridge.title = "Sign in to check bridge"; }
+      return null;
+    }
+    const res = await fetch("/api/bridge/status", { headers: authHeaders() });
+    if (!res.ok) throw new Error("bridge status not ok");
+    const data = await res.json();
+    bridgeOnline = !!data.online;
+    const n = (data.devices || []).length;
+    if (bridgeStatusEl) {
+      bridgeStatusEl.classList.toggle("online", bridgeOnline);
+      if (bridgeStatusText) bridgeStatusText.textContent = bridgeOnline
+        ? ("● Connected — " + (data.connections || 1) + " bridge session" + ((data.connections || 1) > 1 ? "s" : "") + " (" + n + " device" + (n === 1 ? "" : "s") + ")")
+        : (n ? "○ Offline — " + n + " paired device" + (n === 1 ? "" : "s") + ", bridge not running" : "○ Offline — no local bridge paired");
+    }
+    if (composerBridge) {
+      composerBridge.textContent = bridgeOnline ? "● Connected" : "○ Offline";
+      composerBridge.classList.toggle("online", bridgeOnline);
+      composerBridge.classList.toggle("offline", !bridgeOnline);
+      composerBridge.title = bridgeOnline ? "Local bridge connected" : "Local bridge offline";
+    }
+    return data;
+  }
   async function refreshBridgeStatus() {
+    // Manual refresh (e.g., after project select) — immediate, no backoff, but resets poll delay on success
+    try {
+      const data = await doRefreshBridgeStatus();
+      bridgePollDelay = 30000;
+      // reschedule background poll from now
+      scheduleBridgePoll(bridgePollDelay);
+      return data;
+    } catch (e) {
+      if (bridgeStatusText) bridgeStatusText.textContent = "↻ Reconnecting…";
+      if (composerBridge) { composerBridge.textContent = "↻ Reconnecting…"; composerBridge.title = "Reconnecting — server waking up or offline"; composerBridge.classList.add("offline"); }
+      bridgePollDelay = Math.min(bridgePollDelay * 2, 60000);
+      scheduleBridgePoll(bridgePollDelay);
+      return null;
+    }
+  }
+  async function pollBridge() {
+    // Background poll — distinguish 200 offline vs network failure
     if (!getToken()) {
       bridgeOnline = false;
       if (bridgeStatusEl) bridgeStatusEl.classList.remove("online");
       if (bridgeStatusText) bridgeStatusText.textContent = "○ Offline — sign in to check";
       if (composerBridge) { composerBridge.textContent = "○ Offline"; composerBridge.classList.remove("online"); composerBridge.classList.add("offline"); }
-      return null;
+      scheduleBridgePoll(bridgePollDelay);
+      return;
     }
     try {
-      const res = await fetch("/api/bridge/status", { headers: authHeaders() });
-      if (!res.ok) throw new Error();
-      const data = await res.json();
-      bridgeOnline = !!data.online;
-      const n = (data.devices || []).length;
-      if (bridgeStatusEl) {
-        bridgeStatusEl.classList.toggle("online", bridgeOnline);
-        if (bridgeStatusText) bridgeStatusText.textContent = bridgeOnline
-          ? ("● Connected — " + (data.connections || 1) + " bridge session" + ((data.connections || 1) > 1 ? "s" : "") + " (" + n + " device" + (n === 1 ? "" : "s") + ")")
-          : (n ? "○ Offline — " + n + " paired device" + (n === 1 ? "" : "s") + ", bridge not running" : "○ Offline — no local bridge paired");
-      }
-      if (composerBridge) {
-        composerBridge.textContent = bridgeOnline ? "● Connected" : "○ Offline";
-        composerBridge.classList.toggle("online", bridgeOnline);
-        composerBridge.classList.toggle("offline", !bridgeOnline);
-      }
-      return data;
+      const data = await doRefreshBridgeStatus();
+      bridgePollDelay = 30000; // success resets
+      scheduleBridgePoll(bridgePollDelay);
     } catch (e) {
-      if (bridgeStatusText) bridgeStatusText.textContent = "○ Offline — sign in to check";
-      if (composerBridge) { composerBridge.textContent = "○ Offline"; composerBridge.classList.add("offline"); }
-      return null;
+      // network / Render cold start — backoff, show reconnecting
+      if (bridgeStatusText) bridgeStatusText.textContent = "↻ Reconnecting…";
+      if (composerBridge) { composerBridge.textContent = "↻ Reconnecting…"; composerBridge.title = "Reconnecting — server waking up or offline"; }
+      bridgePollDelay = Math.min(bridgePollDelay * 2, 60000);
+      scheduleBridgePoll(bridgePollDelay);
     }
   }
 
@@ -3288,9 +3343,8 @@ init();
     }
   };
 
-  // Initial
-  refreshBridgeStatus();
-  setInterval(refreshBridgeStatus, 30000);
+  // Initial — backoff-aware poll
+  pollBridge();
 
   /* ---------- OpenCode compact: files drawer + context chips + @ / + menus ---------- */
   (function wireCompact() {

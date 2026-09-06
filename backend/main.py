@@ -13,7 +13,16 @@ from app.config import STATIC_DIR, get_settings
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Possible startup/shutdown hooks (DB ping, etc.) can be added here.
+    # Fail fast if critical static assets are missing — prevents silent 404 in production
+    for rel in ("css/style.css", "js/app.js", "index.html", "logo.svg"):
+        p = STATIC_DIR / rel
+        if not p.exists():
+            import logging
+            logging.getLogger("uvicorn.error").error(f"Missing static asset: {p} — build will fail")
+            raise RuntimeError(f"Missing required static asset: {rel} (expected at {p})")
+        if p.stat().st_size == 0:
+            import logging
+            logging.getLogger("uvicorn.error").warning(f"Static asset empty: {p}")
     yield
 
 
