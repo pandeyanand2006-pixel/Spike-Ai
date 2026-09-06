@@ -8,7 +8,7 @@ from typing import Optional, Dict, List
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
 from pydantic import BaseModel
 
-from app.middleware.auth import get_current_user
+from app.middleware.auth import get_current_user, optional_current_user
 from app.models import bridge as bridge_model
 from app.models import project as project_model
 from app.services.workspace_service import get_workspace, detect_stack
@@ -56,8 +56,10 @@ async def claim_pairing(req: PairRequest, user: dict = Depends(get_current_user)
 
 
 @router.get("/status")
-async def bridge_status(user: dict = Depends(get_current_user)):
+async def bridge_status(user: Optional[dict] = Depends(optional_current_user)):
     """Local bridge connection status for the current user."""
+    if user is None:
+        return {"online": False, "connections": 0, "devices": []}
     devices = await bridge_model.list_devices(user["id"])
     online = 0
     for tok in list(_active_bridges.keys()):

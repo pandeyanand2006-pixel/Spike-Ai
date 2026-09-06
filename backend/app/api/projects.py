@@ -6,7 +6,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 
-from app.middleware.auth import get_current_user
+from app.middleware.auth import get_current_user, optional_current_user
 from app.models import project as proj_model
 from app.schemas.project import ProjectCreate, ProjectUpdate
 from app.services.workspace_service import (
@@ -60,7 +60,9 @@ async def create_project(req: ProjectCreate, user: dict = Depends(get_current_us
 
 
 @router.get("")
-async def list_projects(search: Optional[str] = Query(None), user: dict = Depends(get_current_user)):
+async def list_projects(search: Optional[str] = Query(None), user: Optional[dict] = Depends(optional_current_user)):
+    if user is None:
+        return []
     try:
         items = await proj_model.list_projects(user["id"], search or "")
     except Exception as e:
@@ -70,8 +72,6 @@ async def list_projects(search: Optional[str] = Query(None), user: dict = Depend
     out = []
     for doc in items:
         if str(doc.get("workspace", "")).startswith("local:"):
-            # Local projects live on the user's PC; the server mirror dir
-            # says nothing about their stack. Never overwrite with "Empty".
             doc["stack"] = doc.get("stack") or "Local"
             d = _to_out(doc)
             d["local"] = True

@@ -34,9 +34,12 @@ def _short_title(msg: str) -> str:
 @router.get("/sessions")
 async def list_sessions(
     projectId: Optional[str] = Query(None, description="Filter by project"),
-    user: dict = Depends(get_current_user),
+    user: Optional[dict] = Depends(optional_current_user),
 ):
     import asyncio
+    if user is None:
+        # Guest / unauthenticated — return empty so frontend doesn't see 401 console errors
+        return []
     try:
         if projectId in (None, "", "null", "undefined", "NaN"):
             projectId = None

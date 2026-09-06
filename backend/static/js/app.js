@@ -2735,6 +2735,13 @@ init();
 
   /* ---------- Bridge status ---------- */
   async function refreshBridgeStatus() {
+    if (!getToken()) {
+      bridgeOnline = false;
+      if (bridgeStatusEl) bridgeStatusEl.classList.remove("online");
+      if (bridgeStatusText) bridgeStatusText.textContent = "○ Offline — sign in to check";
+      if (composerBridge) { composerBridge.textContent = "○ Offline"; composerBridge.classList.remove("online"); composerBridge.classList.add("offline"); }
+      return null;
+    }
     try {
       const res = await fetch("/api/bridge/status", { headers: authHeaders() });
       if (!res.ok) throw new Error();
@@ -2789,6 +2796,7 @@ init();
   async function loadDevices() {
     const box = $("pairing-devices");
     if (!box) return;
+    if (!getToken()) { box.innerHTML = '<div style="font-size:12.5px">Sign in to pair a bridge.</div>'; return; }
     box.innerHTML = '<div style="font-size:12.5px;color:var(--text-2)">Loading devices…</div>';
     try {
       const res = await fetch("/api/bridge/devices", { headers: authHeaders() });
@@ -2843,6 +2851,7 @@ init();
   if ($("local-cancel")) $("local-cancel").addEventListener("click", closeLocalModal);
   if ($("local-project-form")) $("local-project-form").addEventListener("submit", async (e) => {
     e.preventDefault();
+    if (!getToken()) { toast("Sign in to add projects"); showAuthScreen(true); return; }
     const err = $("lp-error");
     let name = $("lp-name").value.trim();
     const localPath = $("lp-path").value.trim();
@@ -2875,6 +2884,10 @@ init();
   loadProjects = async function (search) {
     search = search || "";
     if (!projectListEl) return;
+    if (!getToken()) {
+      projectListEl.innerHTML = '<div style="padding:12px;color:var(--text-2);font-size:13px">Sign in to manage projects.</div>';
+      return;
+    }
     projectListEl.innerHTML = '<div style="padding:12px;color:var(--text-2);font-size:13px">Loading…</div>';
     try {
       const url = "/api/projects" + (search ? "?search=" + encodeURIComponent(search) : "");
@@ -2999,6 +3012,23 @@ init();
   const _origLoadAgentSessions = loadAgentSessions;
   loadAgentSessions = async function () {
     if (!agentList) return;
+    if (!getToken()) {
+      agentList.innerHTML = "";
+      if (agentSessionsWrap) {
+        agentSessionsWrap.hidden = false;
+        const title = agentSessionsWrap.querySelector(".sidebar-section-title");
+        if (title) title.textContent = "Agent sessions";
+        let empty = agentList.querySelector(".agent-sessions-empty");
+        if (!empty) {
+          empty = document.createElement("div");
+          empty.className = "agent-sessions-empty";
+          empty.style.cssText = "padding:6px 10px;color:var(--text-2);font-size:12px";
+          empty.textContent = "Sign in to view agent sessions";
+          agentList.appendChild(empty);
+        }
+      }
+      return;
+    }
     try {
       const pid = selectedProject ? selectedProject.id : null;
       const url = "/api/agent/sessions" + (pid ? "?projectId=" + encodeURIComponent(pid) : "");
