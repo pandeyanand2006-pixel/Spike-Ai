@@ -60,6 +60,25 @@ class Settings:
         self.web_search_api_key = os.getenv("WEB_SEARCH_API_KEY", "")
         self.image_gen_api_key = os.getenv("IMAGE_GENERATION_API_KEY", "")
 
+        # Spike Agent — provider abstraction (backwards-compatible; Chat still uses Groq)
+        self.llm_provider = os.getenv("LLM_PROVIDER", "groq").strip().lower() or "groq"
+        self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "")
+        self.openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+        self.openrouter_model = os.getenv("OPENROUTER_MODEL", self.model)
+        self.gemini_api_key = os.getenv("GEMINI_API_KEY", "")
+        self.gemini_base_url = os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
+        self.gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+        self.openai_compatible_base_url = os.getenv("OPENAI_COMPATIBLE_BASE_URL", os.getenv("OLLAMA_BASE_URL", ""))
+        self.openai_compatible_api_key = os.getenv("OPENAI_COMPATIBLE_API_KEY", "")
+        self.openai_compatible_model = os.getenv("OPENAI_COMPATIBLE_MODEL", os.getenv("OLLAMA_MODEL", self.model))
+        self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+        self.ollama_model = os.getenv("OLLAMA_MODEL", "llama3.1")
+
+        # Agent iteration limits (high enough for real projects)
+        self.agent_max_steps = int(os.getenv("AGENT_MAX_STEPS", "60"))
+        self.agent_max_retries_per_command = int(os.getenv("AGENT_MAX_RETRIES", "3"))
+        self.agent_max_tool_calls = int(os.getenv("AGENT_MAX_TOOL_CALLS", "120"))
+
         # Vision (image understanding). OpenAI-compatible endpoint.
         # Defaults to Pollinations' free vision proxy (no key required).
         self.vision_base_url = os.getenv(

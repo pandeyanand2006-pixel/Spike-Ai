@@ -384,27 +384,70 @@ def tool_inspect_project(workspace: Path | None = None) -> Dict[str, Any]:
     lines: List[str] = []
     lines.append(f"# Workspace: {ws}")
     lines.append("")
-    # Detect stacks
+    # Detect stacks — now supports arbitrary technologies
     has = lambda p: (ws / p).exists()
-    checks = {
-        "Python": ["requirements.txt", "pyproject.toml", "Pipfile", "setup.py", "main.py", "app.py"],
-        "Node": ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"],
-        "React": ["src", "vite.config.js", "vite.config.ts"],
-        "Next.js": ["next.config.js", "next.config.mjs", "app", "pages"],
-        "Java": ["pom.xml", "build.gradle", "build.gradle.kts"],
-        "C/C++": ["CMakeLists.txt", "Makefile"],
-    }
-    detected = []
-    for stack, files in checks.items():
-        for f in files:
-            if has(f):
-                detected.append(stack)
-                break
-    # also check nested backend for legacy Spike repo
-    if (ws / "backend").exists() and "Python" not in detected:
-        detected.append("FastAPI (backend/)")
-    if not detected:
-        detected = ["Unknown"]
+    # use helper from workspace_service for full coverage, fallback to local checks
+    try:
+        from app.services.workspace_service import detect_stack as _detect_ws
+        full_stack = _detect_ws(ws)
+        detected = [full_stack] if full_stack not in ("Unknown", "General", "Empty") else []
+        # ensure granular markers for agent
+        granular = {
+            "Python": ["requirements.txt", "pyproject.toml", "Pipfile", "setup.py", "main.py", "app.py", "manage.py"],
+            "Node": ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"],
+            "React": ["src/App.jsx", "vite.config.js", "vite.config.ts"],
+            "Next.js": ["next.config.js", "next.config.mjs"],
+            "Java": ["pom.xml", "build.gradle", "build.gradle.kts", "mvnw", "gradlew"],
+            "C/C++": ["CMakeLists.txt", "Makefile", "CMakeCache.txt"],
+            "Go": ["go.mod", "go.sum"],
+            "Rust": ["Cargo.toml", "Cargo.lock"],
+            "Flutter": ["pubspec.yaml"],
+            ".NET": ["*.csproj", "*.sln"],
+            "Docker": ["Dockerfile", "docker-compose.yml"],
+            "Android": ["gradlew", "app/build.gradle"],
+        }
+        for stack, files in granular.items():
+            for f in files:
+                # glob patterns
+                if "*" in f:
+                    import fnmatch as _fnm
+                    found = any(ws.glob(f)) or any(ws.glob(f"**/{f}"))
+                    if found and stack not in detected and stack not in str(detected):
+                        detected.append(stack)
+                        break
+                elif has(f):
+                    if stack not in detected:
+                        detected.append(stack)
+                    break
+        if not detected:
+            detected = [full_stack] if full_stack else ["Unknown"]
+        # deduplicate
+        seen = set()
+        uniq = []
+        for d in detected:
+            if d not in seen:
+                seen.add(d)
+                uniq.append(d)
+        detected = uniq
+    except Exception:
+        checks = {
+            "Python": ["requirements.txt", "pyproject.toml", "Pipfile", "setup.py", "main.py", "app.py"],
+            "Node": ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"],
+            "React": ["src", "vite.config.js", "vite.config.ts"],
+            "Next.js": ["next.config.js", "next.config.mjs", "app", "pages"],
+            "Java": ["pom.xml", "build.gradle", "build.gradle.kts"],
+            "C/C++": ["CMakeLists.txt", "Makefile"],
+        }
+        detected = []
+        for stack, files in checks.items():
+            for f in files:
+                if has(f):
+                    detected.append(stack)
+                    break
+        if (ws / "backend").exists() and "Python" not in detected:
+            detected.append("FastAPI (backend/)")
+        if not detected:
+            detected = ["Unknown"]
     lines.append(f"Detected stack: {', '.join(detected)}")
     lines.append("")
     # Important dirs — generic: show top-level dirs
@@ -505,6 +548,47 @@ def tool_git_diff(path: str = "", workspace: Path | None = None) -> Dict[str, An
         return {"success": proc.returncode == 0, "output": out[:12000]}
     except Exception as e:
         return {"success": False, "output": f"git_diff failed: {e}"}
+
+
+def tool_detect_environment(workspace: Path | None = None) -> Dict[str, Any]:
+    from app.services.environment_detector import format_environment_report
+    ws = workspace or WORKSPACE
+    try:
+        report = format_environment_report(ws)
+        return {"success": True, "output": report}
+    except Exception as e:
+        return {"success": False, "output": f"detect_environment failed: {e}"}
+
+
+def tool_verify_project(timeout: int = 60, workspace: Path | None = None) -> Dict[str, Any]:
+    ws = workspace or WORKSPACE
+    try:
+        import asyncio as _aio
+        # run_inferred_verification is async; handle both contexts
+        from app.services.verification_engine import run_inferred_verification
+        try:
+            loop = _aio.get_running_loop()
+            # if we are already in an async loop, we can't run until complete — fallback to sync inference
+            from app.services.verification_engine import infer_verification_commands
+            from app.services.agent_tools import tool_run_command
+            cmds = infer_verification_commands(ws)
+            if not cmds:
+                return {"success": True, "output": "No verification command inferred — project has no standard build/test markers."}
+            out_parts = []
+            for spec in cmds[:2]:
+                res = tool_run_command(spec["command"], workdir=spec.get("workdir", "."), timeout=timeout, workspace=ws)
+                out_parts.append(f"## {spec['purpose']}: `{spec['command']}` -> {'PASS' if res.get('success') else 'FAIL'}\n{res.get('output','')[:3000]}")
+                if not res.get("success") and "not found" not in (res.get("output","") or "").lower():
+                    return {"success": False, "output": "\n\n".join(out_parts)}
+                if res.get("success"):
+                    return {"success": True, "output": "\n\n".join(out_parts)}
+            return {"success": False, "output": "\n\n".join(out_parts)}
+        except RuntimeError:
+            # no running loop
+            result = _aio.run(run_inferred_verification(ws, timeout=timeout))
+            return result
+    except Exception as e:
+        return {"success": False, "output": f"verify_project failed: {e}"}
 
 
 def tool_run_command(command: str, workdir: str = "", timeout: int = 30, workspace: Path | None = None) -> Dict[str, Any]:
@@ -647,13 +731,23 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "params": ["todos"],
         "fn": lambda **kw: {"success": True, "output": "Todo list updated (handled by loop)"},
     },
+    "detect_environment": {
+        "description": "Detect installed toolchains and project-local wrappers (real, not fabricated).",
+        "params": [],
+        "fn": lambda **kw: tool_detect_environment(),
+    },
+    "verify_project": {
+        "description": "Run inferred verification (build/test) for current project with real execution.",
+        "params": ["timeout"],
+        "fn": lambda **kw: tool_verify_project(int(kw.get("timeout", 60) or 60)),
+    },
 }
 
 # Permission sets
-READ_TOOLS = {"read_file", "list_directory", "search_files", "get_file_info", "inspect_project", "git_status", "git_diff"}
+READ_TOOLS = {"read_file", "list_directory", "search_files", "get_file_info", "inspect_project", "git_status", "git_diff", "detect_environment", "verify_project"}
 WRITE_TOOLS = {"write_file", "edit_file", "create_directory", "move_file"}
 DESTRUCTIVE_TOOLS = {"delete_file"}
-SHELL_TOOLS = {"run_command"}
+SHELL_TOOLS = {"run_command", "verify_project"}
 
 
 def get_tool_registry(workspace: Path | None = None) -> Dict[str, Dict[str, Any]]:
@@ -729,5 +823,15 @@ def get_tool_registry(workspace: Path | None = None) -> Dict[str, Dict[str, Any]
             "description": "Create or update the task checklist for this session.",
             "params": ["todos"],
             "fn": lambda **kw: {"success": True, "output": "Todo list updated (handled by loop)"},
+        },
+        "detect_environment": {
+            "description": "Detect installed toolchains and project-local wrappers.",
+            "params": [],
+            "fn": lambda **kw: tool_detect_environment(workspace=ws),
+        },
+        "verify_project": {
+            "description": "Run inferred verification (build/test) for current project.",
+            "params": ["timeout"],
+            "fn": lambda **kw: tool_verify_project(int(kw.get("timeout", 60) or 60), workspace=ws),
         },
      }

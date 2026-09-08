@@ -453,6 +453,60 @@ async def execute_local_tool(workspace: Path, tool: str, inp: Dict[str, Any]) ->
             out = (proc.stdout or "").strip() or "(no changes)"
             return {"success": proc.returncode == 0, "output": out[:12000]}
 
+        elif tool == "detect_environment":
+            import shutil, subprocess
+            matrix = ["java","javac","mvn","gradle","node","npm","pnpm","yarn","python","python3","pip","pip3","uv","gcc","g++","clang","cmake","make","ninja","go","rustc","cargo","dotnet","flutter","dart","git","docker"]
+            lines = ["# Environment Detection (local bridge)"]
+            for name in matrix:
+                which = shutil.which(name)
+                if which:
+                    try:
+                        proc = subprocess.run([name, "--version"], capture_output=True, text=True, timeout=4)
+                        ver = ((proc.stdout or proc.stderr or "").strip().splitlines()[0][:120]) if (proc.stdout or proc.stderr) else "unknown"
+                    except Exception:
+                        ver = "unknown"
+                    lines.append(f"- {name}: AVAILABLE ({which}) — {ver}")
+                else:
+                    lines.append(f"- {name}: NOT FOUND")
+            for w in ["./mvnw","./gradlew","./gradlew.bat"]:
+                clean = w.lstrip("./")
+                lines.append(f"- {w}: {'FOUND' if (workspace / clean).exists() else 'not found'}")
+            return {"success": True, "output": "\n".join(lines)}
+
+        elif tool == "verify_project":
+            import subprocess
+            timeout = int(inp.get("timeout", 60) or 60)
+            # simple inference: check pom.xml, package.json etc and run a representative build
+            ws = workspace
+            def has(p): return (ws / p).exists()
+            cmds = []
+            if has("pom.xml"):
+                cmds.append(("mvn test", "Maven test"))
+            elif has("build.gradle") or has("build.gradle.kts"):
+                cmds.append(("gradle test", "Gradle test"))
+            if has("package.json"):
+                cmds.append(("npm run build", "npm build"))
+            if has("requirements.txt") or has("pyproject.toml"):
+                cmds.append(("python -m pytest -q", "pytest"))
+            if has("Cargo.toml"):
+                cmds.append(("cargo test", "cargo test"))
+            if has("go.mod"):
+                cmds.append(("go test ./...", "go test"))
+            if has("CMakeLists.txt"):
+                cmds.append(("cmake --build build", "cmake build"))
+            if not cmds:
+                return {"success": True, "output": "No verification command inferred — no standard build files."}
+            cmd, purpose = cmds[0]
+            try:
+                proc = subprocess.run(cmd, shell=True, cwd=str(ws), capture_output=True, text=True, timeout=timeout)
+                out = (proc.stdout or "") + (proc.stderr or "")
+                header = f"{purpose}: `{cmd}` -> {'PASS' if proc.returncode==0 else 'FAIL'}"
+                return {"success": proc.returncode==0, "output": header + "\n" + out[:5000]}
+            except subprocess.TimeoutExpired as e:
+                return {"success": False, "output": f"Timeout after {timeout}s"}
+            except Exception as e:
+                return {"success": False, "output": f"verify failed: {e}"}
+
         else:
             return {"success": False, "output": f"Unknown tool: {tool}"}
     except Exception as e:

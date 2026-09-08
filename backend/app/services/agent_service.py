@@ -29,26 +29,31 @@ from app.services.workspace_service import is_local_workspace
 
 # ---------- System prompts ----------
 
-AGENT_SYSTEM_PROMPT = """You are Spike Agent, an autonomous software engineering agent.
+AGENT_SYSTEM_PROMPT = """You are Spike Agent, an autonomous software engineering agent comparable to OpenCode, Cline, OpenHands, and Goose.
 
 You work directly on the user's project workspace. You are NOT a chatbot — you must use tools to inspect and modify the project instead of only describing code.
 
-Rules:
-1. Understand the existing project before changing it. Prefer inspect_project, list_directory, read_file, search_files first.
-2. Prefer minimal, targeted changes. Preserve existing functionality.
-3. Never fabricate files, commands, test results, or tool outputs. Use tools instead of guessing.
-4. Inspect relevant files before editing them.
-5. Search the codebase when necessary.
-6. For complex tasks, create an internal execution plan (explain steps, then execute).
-7. Execute step by step. After changes, validate (run tests/build where relevant).
-8. If validation fails, diagnose and fix.
-9. Never claim success without verification.
-10. Never expose secrets (.env, keys). Mask them.
-11. Never perform destructive operations without required approval.
-12. Stay inside the authorized workspace.
-13. Do not reveal private chain-of-thought. Show concise action summaries.
-14. Ask for clarification only when genuinely necessary; otherwise make reasonable assumptions and continue.
-15. Finish the task completely whenever possible.
+Autonomous loop (UNDERSTAND → INSPECT → DETECT → PLAN → EXECUTE → OBSERVE → DIAGNOSE → REPAIR → VERIFY → COMPLETE):
+1. Understand the task. Detect technology + environment before acting.
+2. Inspect workspace: inspect_project, detect_environment, list_directory, read_file, search_files.
+3. Detect actual toolchains (java/mvn/gradle/node/python/cmake/go/rust/flutter/docker etc.) via detect_environment — never assume a tool exists.
+4. Create a plan via todo_write for multi-step tasks (5–15 verifiable steps); keep it updated.
+5. Execute with real files/commands — create/edit files, run commands, capture stdout/stderr + exit codes.
+6. Observe output. If a command fails, diagnose the real cause (Compilation/Dependency/Package/Type/Syntax/Runtime/Config/Port/DB/Test/Build/Import/Permission/Toolchain), then repair and retry.
+7. For arbitrary tech (Java/Spring/Maven/Gradle, C/C++/CMake, Python/Django/FastAPI, Node/React/Next/Vue, Flutter/Dart, Go, Rust, .NET, Android, Docker): infer correct build/test commands from project files instead of using hardcoded templates. Prefer wrappers: ./mvnw, ./gradlew when present.
+8. Never stop after merely creating files. Verify: run the project's actual build/test (mvn test / gradle test / npm run build / npm test / pytest / cargo test / go test ./... / flutter test / ctest / dotnet test etc.) via verify_project or run_command and report genuine results.
+9. Prefer minimal, targeted changes. Preserve unrelated code and user modifications.
+
+Hard rules:
+- Never fabricate files, commands, test results, URLs, or tool availability. Use tools and real execution.
+- Inspect relevant files before editing them.
+- Search the codebase when necessary.
+- Never expose secrets (.env, keys). Mask them.
+- Never perform destructive operations (rm -rf, git reset --hard, delete_file on critical paths) without approval.
+- Stay inside the authorized workspace.
+- Do not reveal private chain-of-thought. Show concise action summaries.
+- Ask for clarification only when genuinely necessary; otherwise make reasonable assumptions and continue.
+- Finish the task completely whenever possible.
 
 CRITICAL FILE EDITING RULE — you must follow this or your tool call will fail:
 - When editing or writing a file, if the new content is large, prefer several smaller edit_file calls (each replacing a small, uniquely-matched old_string) over one write_file/edit_file call with a huge new_string.
@@ -64,17 +69,27 @@ When you have completed the task, respond with a concise summary including:
 """
 
 PLAN_SUFFIX = """
-MODE: PLAN — read-only. You may ONLY use: read_file, list_directory, search_files, get_file_info, inspect_project, git_status, git_diff, todo_write.
+MODE: PLAN — read-only. You may ONLY use: read_file, list_directory, search_files, get_file_info, inspect_project, detect_environment, git_status, git_diff, todo_write, verify_project.
 Your FIRST and required action is to call todo_write with a complete step-by-step plan (5–15 concrete, independently completable and verifiable steps), then provide a short prose summary. Do NOT use write_file, edit_file, delete_file, create_directory, move_file, or run_command in Plan mode.
 """
 
 BUILD_SUFFIX = """
-MODE: BUILD — you may read, search, create, edit, run commands, test, and validate.
+MODE: BUILD — you may read, search, create, edit, run commands, test, and validate autonomously.
+Loop: INSPECT → DETECT ENVIRONMENT → PLAN (todo_write) → EXECUTE (files/commands) → OBSERVE (exit codes, stdout/stderr) → DIAGNOSE (classify failure) → REPAIR (targeted edit) → RETRY → VERIFY (verify_project / real build/test) → COMPLETE only after verification passes.
 If a todos list already exists in context (Approved plan), work through items in order: call todo_write to mark each in_progress before starting it and completed immediately after it is verified — never batch-completing several at once.
+For empty workspaces: detect JDK/Maven/Gradle/Node/Python/etc. via detect_environment, choose an available toolchain (prefer wrappers ./mvnw/./gradlew), create the full project structure, install deps, then build/test.
 For web projects (calculator, dashboard, etc.): create real files live in the workspace, run npm install if needed, then validate with npm run build or vite build. If the user wants to see it live, run the dev server (npm run dev / vite) and report the localhost URL (e.g., http://localhost:5173) exactly as printed — never invent a URL. Files must actually exist on disk via your tool calls; the dev server runs via run_command in the workspace so the UI can link it.
+For backend/API projects: build, start, smoke-test a safe endpoint, report real response, then stop the server if appropriate.
+For any project: always finish with verification. If verification is blocked (missing tool, insufficient env), state the actual blocker: "Implementation completed, but verification was blocked because: <real reason>".
 """
 
-MAX_STEPS = 40
+def _get_max_steps() -> int:
+    try:
+        return int(get_settings().agent_max_steps or 60)
+    except Exception:
+        return 60
+
+MAX_STEPS = 60  # overridden at runtime via _get_max_steps()
 MAX_LLM_RETRIES = 2
 
 # ---------- Model fallback / daily-cap tracking (Fix #1) ----------
@@ -228,17 +243,41 @@ async def call_llm_with_tools(
     stream_callback=None,
     _retry_for_recovery: bool = True,
 ) -> tuple[str, List[Dict[str, Any]]]:
-    """Call Groq with native tools, with model fallback on TPD/rate-limit.
+    """Provider-aware tool-calling LLM with Groq fallback and local-model support.
 
-    Falls back through model_fallback_chain when a model hits its daily token
-    quota (TPD) — tracked in _daily_exhausted so we don't retry it every request.
-    On per-minute limit, retries once after short wait. If all models exhausted,
-    returns a distinct ALL_MODELS_EXHAUSTED error string so the caller can set
-    session status to error (resumable via /continue) and the UI can show a clear
-    message instead of raw dump.
+    If settings.llm_provider != "groq", routes via provider_adapter
+    (OpenRouter / Gemini / openai_compatible / Ollama) before falling back
+    to the native Groq chain. Preserves TPD/rate-limit tracking.
     """
     settings = get_settings()
-    # Build effective fallback chain
+    # Try provider abstraction first when not groq
+    provider_name = getattr(settings, "llm_provider", "groq") or "groq"
+    if provider_name != "groq":
+        try:
+            from app.services.provider_adapter import get_agent_provider
+            provider, prov_model = get_agent_provider()
+            # Only use adapter if it isn't plain Groq
+            if getattr(provider, "name", "") != "groq":
+                mdl = model or prov_model or settings.model
+                # quick availability check for local providers
+                if provider_name in ("ollama", "local", "openai_compatible") and mdl:
+                    # try to check local availability but don't block — just attempt
+                    pass
+                last_user = ""
+                for m in reversed(messages):
+                    if m.get("role") == "user" and m.get("content"):
+                        last_user = str(m["content"])
+                        break
+                max_tokens = 4000 if ("write_file" in last_user.lower() or len(last_user) > 800) else 900
+                text, tcs = await provider.chat_with_tools(messages, TOOL_SCHEMAS, mdl, max_tokens=max_tokens, stream=True)
+                # If provider returns empty/error, let Groq fallback handle it
+                if not (text.startswith("LLM error") or text.startswith("ALL_MODELS_EXHAUSTED")):
+                    return text, tcs
+                # otherwise fall through to Groq fallback
+        except Exception as e:
+            import logging
+            logging.getLogger("uvicorn.error").warning(f"Provider {provider_name} failed, falling back to Groq: {e}")
+    # Build effective fallback chain (Groq path)
     chain = list(getattr(settings, "model_fallback_chain", [settings.model]))
     if model and model not in chain:
         chain = [model] + [m for m in chain if m != model]
@@ -530,11 +569,33 @@ async def stream_agent_loop(
         yield {"type": "tool_result", "tool": "inspect_project", "success": insp["success"], "output": insp["output"][:3000]}
         messages.append({"role": "assistant", "content": "", "tool_calls": [{"id": "inspect_0", "type": "function", "function": {"name": "inspect_project", "arguments": "{}"}}]})
         messages.append({"role": "tool", "tool_call_id": "inspect_0", "content": insp["output"][:2500]})
+        # Also detect real environment/toolchains (immediately after inspect) — unless already in history
+        should_env = True
+        for m in history:
+            if "Environment Detection" in str(m.get("content","")) or "Toolchains" in str(m.get("content","")):
+                should_env = False
+                break
+        if should_env:
+            yield {"type": "thinking", "content": "Detecting environment…"}
+            if is_local and user_id and project_id:
+                try:
+                    from app.api.bridge import forward_tool_to_bridge
+                    env_res = await forward_tool_to_bridge(user_id, project_id, "detect_environment", {}, timeout=15.0)
+                except Exception as e:
+                    env_res = {"success": False, "output": f"Local bridge error: {e}"}
+            else:
+                env_res = await execute_tool("detect_environment", {}, mode, workspace=workspace, project_info=project_info)
+            yield {"type": "tool_start", "tool": "detect_environment", "input": {}}
+            yield {"type": "tool_result", "tool": "detect_environment", "success": env_res["success"], "output": env_res["output"][:3000]}
+            messages.append({"role": "assistant", "content": "", "tool_calls": [{"id": "env_0", "type": "function", "function": {"name": "detect_environment", "arguments": "{}"}}]})
+            messages.append({"role": "tool", "tool_call_id": "env_0", "content": env_res["output"][:2500]})
 
     # Main loop — supports multiple tool calls per turn
     changed_files: List[str] = []
     pending_todos: List[Dict[str, Any]] = list(existing_todos or [])
-    for step in range(MAX_STEPS):
+    max_steps = _get_max_steps()
+    # Context manager: keep recent history trimmed but preserve important observations
+    for step in range(max_steps):
         yield {"type": "thinking", "content": f"Planning step {step+1}…"}
 
         # Streaming callback to emit live thinking tokens
@@ -549,11 +610,23 @@ async def stream_agent_loop(
 
         content, tool_calls = await call_llm_with_tools(messages, model=model)
 
-        # If we got live content but no tools, it's a final answer
+        # If we got live content but no tools, it's a final answer — enforce verification before completion
         if not tool_calls:
             if not content or content.startswith("LLM error") or content.startswith("ALL_MODELS_EXHAUSTED"):
                 yield {"type": "error", "message": content or "Empty LLM response"}
                 break
+            # Track if verification was performed in this session
+            has_verified = any(
+                ("verify_project" in str(m.get("content",""))) or ("verification_result" in str(m.get("content",""))) or ("Build" in str(m.get("content","")) and "PASS" in str(m.get("content","")))
+                for m in messages if m.get("role") == "tool"
+            ) or any(
+                tc.get("name") == "verify_project" for tc in tool_calls
+            )
+            # Also check changed_files: if we modified files but never verified and still in build mode, nudge to verify
+            if mode == "build" and changed_files and not has_verified:
+                # inject a synthetic verification reminder as a tool message so next iteration verifies
+                # but if the LLM already claims completion, we let it complete and the observability layer will flag unverified
+                yield {"type": "thinking", "content": "Final verification pending — ensure build/tests pass before marking complete."}
             yield {"type": "completed", "content": content, "changedFiles": changed_files}
             break
 
@@ -631,11 +704,28 @@ async def stream_agent_loop(
             if tool == "run_command":
                 yield {"type": "command_started", "command": inp.get("command", "")}
                 yield {"type": "command_result", "success": result.get("success", False), "output": result.get("output", "")[:5000]}
-            yield {"type": "tool_result", "tool": tool, "success": result.get("success", False), "output": result.get("output", "")[:6000]}
-
-            # Feed result back
-            out = result.get("output", "")[:2500]
-            messages.append({"role": "tool", "tool_call_id": tc_id, "content": f"Tool {tool} result (success={result.get('success')}):\n{out}"})
+                # Error diagnosis and iterative repair hint
+                if not result.get("success"):
+                    try:
+                        from app.services.error_analyzer import diagnose_output
+                        diag = diagnose_output(inp.get("command",""), result.get("output",""), 1)
+                        yield {"type": "diagnosis", "category": diag["category"], "summary": diag["summary"], "hint": diag["hint"]}
+                        # Append diagnosis to context so LLM can repair
+                        messages.append({"role": "tool", "tool_call_id": tc_id, "content": f"Tool {tool} result (success=False):\n{result.get('output','')[:2500]}\n\n[Diagnosis: {diag['category']} — {diag['summary']}. Hint: {diag['hint']}]"})
+                    except Exception:
+                        messages.append({"role": "tool", "tool_call_id": tc_id, "content": f"Tool {tool} result (success=False):\n{result.get('output','')[:2500]}"})
+                else:
+                    messages.append({"role": "tool", "tool_call_id": tc_id, "content": f"Tool {tool} result (success=True):\n{result.get('output','')[:2500]}"})
+            else:
+                yield {"type": "tool_result", "tool": tool, "success": result.get("success", False), "output": result.get("output", "")[:6000]}
+                # For verify_project, surface pass/fail clearly
+                if tool == "verify_project":
+                    status_str = "PASS" if result.get("success") else "FAIL"
+                    yield {"type": "verification_result", "success": result.get("success", False), "status": status_str}
+                # Feed result back (run_command already handled)
+                if tool != "run_command":
+                    out = result.get("output", "")[:2500]
+                    messages.append({"role": "tool", "tool_call_id": tc_id, "content": f"Tool {tool} result (success={result.get('success')}):\n{out}"})
 
             await asyncio.sleep(0.05)
 

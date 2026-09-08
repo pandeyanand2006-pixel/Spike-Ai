@@ -147,7 +147,7 @@ def ensure_workspace(user_id: str, project_id: str) -> Path:
 
 
 def detect_stack(workspace: Path) -> str:
-    """Detect stack from workspace files."""
+    """Detect stack from workspace files — now supports arbitrary technologies (Java/Spring, CMake, Go, Rust, Flutter, .NET, Docker, etc.)."""
     has = lambda p: (workspace / p).exists()
     stacks = []
     if has("package.json"):
@@ -161,16 +161,79 @@ def detect_stack(workspace: Path) -> str:
                 stacks.append("Node.js")
         except Exception:
             stacks.append("Node.js")
-    if has("requirements.txt") or has("pyproject.toml") or has("Pipfile"):
-        if has("main.py") and "fastapi" in (workspace / "main.py").read_text()[:1000].lower() if has("main.py") else False:
-            stacks.append("FastAPI")
-        else:
+    if has("requirements.txt") or has("pyproject.toml") or has("Pipfile") or has("setup.py"):
+        try:
+            if has("main.py") and "fastapi" in (workspace / "main.py").read_text()[:1000].lower() if has("main.py") else False:
+                stacks.append("FastAPI")
+            elif has("manage.py"):
+                stacks.append("Django")
+            elif has("pyproject.toml"):
+                # check toml for django/flask
+                t = (workspace / "pyproject.toml").read_text()[:3000].lower()
+                if "django" in t:
+                    stacks.append("Django")
+                elif "flask" in t:
+                    stacks.append("Flask")
+                else:
+                    stacks.append("Python")
+            else:
+                stacks.append("Python")
+        except Exception:
             stacks.append("Python")
     if has("vite.config.js") or has("vite.config.ts"):
         if "React" not in stacks:
             stacks.append("Vite")
     if has("index.html") and has("style.css"):
         stacks.append("HTML")
+    # Java / Spring / Maven / Gradle
+    if has("pom.xml"):
+        stacks.append("Java+Maven" if "Java+Maven" not in stacks else "")
+        # Spring detection via pom content
+        try:
+            if "spring-boot" in (workspace / "pom.xml").read_text()[:5000].lower():
+                stacks.append("Spring Boot")
+        except Exception:
+            pass
+    if has("build.gradle") or has("build.gradle.kts"):
+        if "Java+Gradle" not in stacks:
+            stacks.append("Java+Gradle")
+    if has("mvnw") or has("gradlew") or has("gradlew.bat"):
+        if "Maven Wrapper" not in stacks and has("mvnw"):
+            stacks.append("Maven Wrapper")
+        if "Gradle Wrapper" not in stacks and (has("gradlew") or has("gradlew.bat")):
+            stacks.append("Gradle Wrapper")
+    # C/C++ / CMake
+    if has("CMakeLists.txt"):
+        stacks.append("CMake")
+    if has("Makefile") and "CMake" not in stacks:
+        stacks.append("Make")
+    if has("configure.ac") or has("configure"):
+        stacks.append("Autotools")
+    # Go
+    if has("go.mod"):
+        stacks.append("Go")
+    # Rust
+    if has("Cargo.toml"):
+        stacks.append("Rust")
+    # Flutter / Dart
+    if has("pubspec.yaml"):
+        stacks.append("Flutter")
+    # .NET
+    try:
+        if any(workspace.glob("*.csproj")) or any(workspace.glob("*.sln")) or any(workspace.glob("**/*.csproj")):
+            stacks.append(".NET")
+    except Exception:
+        pass
+    # Docker
+    if has("Dockerfile"):
+        stacks.append("Docker")
+    if has("docker-compose.yml") or has("docker-compose.yaml"):
+        stacks.append("Docker Compose")
+    # Android
+    if has("app/build.gradle") or (has("gradlew") and has("app/src")):
+        if "Android" not in stacks:
+            stacks.append("Android")
+    stacks = [s for s in stacks if s]
     if not stacks:
         # Only report "Empty" when the directory genuinely contains zero
         # usable files (ignoring dotfiles). Otherwise label it honestly.

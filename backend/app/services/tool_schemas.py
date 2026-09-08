@@ -210,4 +210,26 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "detect_environment",
+            "description": "Detect installed toolchains (java, mvn, gradle, node, python, cmake, go, rust, flutter, docker, etc.) and project-local wrappers. Returns real availability — never fabricated.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "verify_project",
+            "description": "Run inferred verification (build/test) for the current project. Uses real build systems: mvn/gradle/npm/pytest/cargo/go/flutter etc. Returns actual stdout/stderr.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "timeout": {"type": "integer", "description": "Timeout seconds (10-120)", "default": 60}
+                },
+                "required": [],
+            },
+        },
+    },
 ]
